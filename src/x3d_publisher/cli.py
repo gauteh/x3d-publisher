@@ -36,6 +36,17 @@ def add_convert_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--workers", type=int, default=int(env("WORKERS", 4)), help="threads for dask/zarr (default 4, or $WORKERS)")
 
 
+def cmd_serve(a) -> int:
+    from . import serve
+
+    print(f"serving {a.dir} on http://{a.host}:{a.port}", file=sys.stderr)
+    try:
+        serve.serve(a.dir, a.port, host=a.host)
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
 def cmd_models(a) -> int:
     for n in models.bundled():
         m = models.load(n)
@@ -108,6 +119,12 @@ def parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("models", help="list the bundled model configs").set_defaults(fn=cmd_models)
+
+    v = sub.add_parser("serve", help="serve a local store over HTTP (CORS, Range, cache headers) as an S3 stand-in")
+    v.add_argument("dir", nargs="?", default="store")
+    v.add_argument("port", nargs="?", type=int, default=8000)
+    v.add_argument("--host", default="127.0.0.1")
+    v.set_defaults(fn=cmd_serve)
 
     c = sub.add_parser("convert", help="source dataset -> local store <out>/<name>/<run>/")
     add_convert_args(c)

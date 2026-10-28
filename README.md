@@ -15,6 +15,7 @@ only writer. It contains no credentials or bucket names: those are deployment se
     x3d-publish convert ww3_4km --out store --hours 72   # -> store/ww3_4km/<run>/ + latest.json
     x3d-publish publish store/ww3_4km s3://BUCKET/ww3_4km --endpoint-url URL --keep 3 [--configure-bucket]
     x3d-publish fetch s3://BUCKET/ww3_4km local/ww3_4km  # the inverse (anonymous by default)
+    x3d-publish serve store 8000                         # local S3 stand-in over HTTP (CORS, Range, cache headers)
     x3d-publish run ww3_4km --bucket-url s3://BUCKET     # convert -> publish -> prune, in a scratch dir
 
 `run` is the cron/CronJob entrypoint. It exits 0 without publishing when the published store (checked over
