@@ -1,0 +1,45 @@
+stages:
+  - test
+
+variables:
+  CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
+  # where x3d (the client) lives. Auth: a masked CI/CD variable X3D_TOKEN (project/deploy access token with read_repository),
+  # else this project's job token, which x3d must allow (Settings > CI/CD > Job token permissions)
+  X3D_PROJECT: "wave-world/x3d"
+  X3D_REF: "main"
+
+default:
+  image: rust:1-bookworm   # Debian python3 is 3.11 (tomllib); rust is for building x3d
+  tags:
+    - k8s-root
+  cache:
+    key: cargo-$CI_COMMIT_REF_SLUG
+    paths:
+      - .cargo/registry
+
+.setup: &setup
+  - apt-get update -qq && apt-get install -y -qq python3-venv python3-dev >/dev/null
+  - python3 -m venv .venv && . .venv/bin/activate
+
+# Offline: converter, publish/fetch/prune/run against a mocked S3, on a synthetic dataset.
+test:
+  stage: test
+  script:
+    - *setup
+    - pip install -q -e ".[test]"
+    - pytest -v
+
+# Conformance with the client: build x3d, check the publisher's output reads back through it, then run x3d's own
+# tests against a store built by this publisher (X3D_TEST_STORE), so format drift on either side fails here.
+test-x3d:
+  stage: test
+  script:
+    - *setup
+    - CRED="${X3D_TOKEN:+oauth2:$X3D_TOKEN}"; CRED="${CRED:-gitlab-ci-token:$CI_JOB_TOKEN}"
+    - git clone -q --depth 1 -b "$X3D_REF" "https://${CRED}@${CI_SERVER_HOST}/${X3D_PROJECT}.git" x3d-src
+    - pip install -q -e "./x3d-src[test]"   # builds the Rust extension via maturin
+    - pip install -q -e ".[test]"
+    - pytest -v                                # includes reading the store back through x3d
+    - python tests/make_store.py store
+    - cd x3d-src
+    - X3D_CACHE=0 X3D_TEST_STORE="$CI_PROJECT_DIR/store/ww3_4km" pytest -v -m "not rgw" --ignore=tests/test_benchmark.py --ignore=tests/test_microbench.py

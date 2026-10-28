@@ -1,4 +1,4 @@
-"""Command line: x3d-publisher {models,convert,publish,fetch,run}."""
+"""Command line: x3d-publish {models,convert,publish,fetch,run}."""
 from __future__ import annotations
 
 import argparse
@@ -103,7 +103,7 @@ def cmd_run(a) -> int:
 
 
 def parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="x3d-publisher", description=__doc__)
+    p = argparse.ArgumentParser(prog="x3d-publish", description=__doc__)
     p.add_argument("-v", "--verbose", action="store_true", help="debug output")
     sub = p.add_subparsers(dest="cmd", required=True)
 

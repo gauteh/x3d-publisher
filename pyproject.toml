@@ -10,10 +10,10 @@ requires-python = ">=3.11"
 dependencies = ["numpy", "xarray", "zarr>=3", "dask", "netCDF4", "boto3"]
 
 [project.optional-dependencies]
-test = ["pytest", "moto[s3]", "x3d"]
+test = ["pytest", "moto[s3]"]  # x3d (optional): tests/test_convert.py also reads the store back through it
 
 [project.scripts]
-x3d-publisher = "x3d_publisher.cli:main"
+x3d-publish = "x3d_publisher.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
