@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "x3d-publisher"
+version = "0.1.0"
+description = "Convert source datasets to the x3d Zarr v3 store and publish them to S3"
+requires-python = ">=3.11"
+dependencies = ["numpy", "xarray", "zarr>=3", "dask", "netCDF4", "boto3"]
+
+[project.optional-dependencies]
+test = ["pytest", "moto[s3]", "x3d"]
+
+[project.scripts]
+x3d-publisher = "x3d_publisher.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"x3d_publisher.models" = ["*.toml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

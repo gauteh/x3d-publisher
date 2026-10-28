@@ -1,0 +1,42 @@
+# WW3 4 km (MET Norway). No credentials or bucket names belong here: where to publish is a deployment
+# matter (see `x3d-publisher run --help`).
+name = "ww3_4km"
+url = "https://thredds.met.no/thredds/dodsC/ww3_4km_agg"
+hours = 72  # default window: the last N time steps
+
+# source names
+y_dim = "rlat"
+x_dim = "rlon"
+lat = "latitude"
+lon = "longitude"
+# time of the newest model run (the aggregate stitches runs together); optional
+reference_time = "forecast_reference_time"
+
+# phs0 = wind sea, phs1 = swell (spectral wave-age partitioning)
+vars = ["hs", "phs0", "phs1", "tp", "dir", "uwnd", "vwnd"]
+# period/direction of the partitions drive the animated waves; only needed at overview resolution
+ov_vars = ["hs", "phs0", "phs1", "ptp0", "ptp1", "pdir0", "pdir1"]
+
+[layout]
+zstd_level = 5
+map_chunk = 256            # inner chunk edge of map.zarr
+map_shard = [1, 1280, 768] # (time, y, x): the whole grid for one time step
+ts_chunk = 16              # inner chunk edge of ts.zarr (all time steps)
+ts_shard = 128
+ov_factor = 4              # overview = block means at 1/ov_factor resolution
+ov_tchunk = 24
+mesh_stride = 4            # decimation of grid.bin (viewer geometry)
+
+# int16 packing: precision = scale_factor (about 3x smaller than float32)
+[scales]
+hs = 0.01
+phs0 = 0.01
+phs1 = 0.01
+ptp0 = 0.01
+ptp1 = 0.01
+pdir0 = 0.1
+pdir1 = 0.1
+tp = 0.01
+dir = 0.1
+uwnd = 0.01
+vwnd = 0.01
