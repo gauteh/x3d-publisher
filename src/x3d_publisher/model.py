@@ -27,6 +27,10 @@ class Model:
     back_hours: int | None = None
     # fixed selections on other dimensions, e.g. {depth = 0.0} for the surface layer
     select: dict = field(default_factory=dict)
+    # global attributes: `attrs` overrides/extends those of the source, `drop_attrs` leaves some of the source's out
+    # (the time-dependent ones and the history of the source file are always left out)
+    attrs: dict = field(default_factory=dict)
+    drop_attrs: tuple[str, ...] = ()
     zstd_level: int = 5
     map_chunk: int = 256
     map_shard: tuple[int, int, int] = (1, 1280, 768)
@@ -44,6 +48,8 @@ class Model:
         d["scales"] = d.pop("scales", {})
         known = set(cls.__dataclass_fields__) - {"extra"}
         params = {k: v for k, v in {**d, **layout}.items() if k in known}
+        if "drop_attrs" in params:
+            params["drop_attrs"] = tuple(params["drop_attrs"])
         if "map_shard" in params:
             params["map_shard"] = tuple(params["map_shard"])
         m = cls(**params, extra={k: v for k, v in {**d, **layout}.items() if k not in known})

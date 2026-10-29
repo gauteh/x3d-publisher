@@ -16,6 +16,9 @@ reference_time = "forecast_reference_time"
 # the surface layer
 select = { depth = 0.0 }
 
+# the aggregate's title/title_no name the time range of its newest file
+drop_attrs = ["title_no"]
+
 vars = ["u_eastward", "v_northward", "temperature", "Uwind_eastward", "Vwind_northward"]
 ov_vars = ["u_eastward", "v_northward", "temperature", "Uwind_eastward", "Vwind_northward"]
 
@@ -36,3 +39,6 @@ v_northward = 0.001
 temperature = 0.001        # degC
 Uwind_eastward = 0.01      # m/s
 Vwind_northward = 0.01
+
+[attrs]
+title = "NorKyst-800 (Norkyst_v3-800m): ROMS ocean forecast, surface layer"

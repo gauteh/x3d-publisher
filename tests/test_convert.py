@@ -91,6 +91,11 @@ def test_x3d_reads_what_was_published(tmp_path, ww3, source):
     ds = xr.open_dataset(f"x3d+file://{out / 'ww3_4km'}")
     ref = xr.open_dataset(source)
     np.testing.assert_allclose(ds.hs.values, ref.hs.values, atol=ww3.scales["hs"], equal_nan=True)
+    assert "rotated_pole" in ds.coords
+    assert ds.rotated_pole.attrs["grid_mapping_name"] == ref.rotated_pole.attrs["grid_mapping_name"]
+    assert ds.rotated_pole.attrs["proj4"] == ref.rotated_pole.attrs["proj4"]
+    assert ds.hs.attrs["grid_mapping"] == "rotated_pole"
+    assert ds.attrs["title"] == ref.attrs["title"]
 
 
 def norkyst_source(path, nt=8, ny=40, nx=36, ref="2026-01-01T04:00"):
@@ -112,6 +117,12 @@ def norkyst_source(path, nt=8, ny=40, nx=36, ref="2026-01-01T04:00"):
     ds["lon"] = (("Y", "X"), np.add.outer(np.zeros(ny), np.linspace(0, 10, nx)))
     ds["lat"] = (("Y", "X"), np.add.outer(np.linspace(60, 65, ny), np.zeros(nx)))
     ds["forecast_reference_time"] = np.datetime64(ref, "ns")
+    ds["projection_stere"] = ((), np.int32(0), {
+        "grid_mapping_name": "polar_stereographic", "straight_vertical_longitude_from_pole": 70.0, "latitude_of_projection_origin": 90.0,
+        "standard_parallel": 60.0, "false_easting": 3369600.0, "false_northing": 1844800.0,
+        "proj4": "+proj=stere +lat_0=90 +lat_ts=60 +lon_0=70 +x_0=3369600 +y_0=1844800 +a=6378137 +b=6356752.3142 +units=m +no_defs +type=crs",
+    })
+    ds.attrs.update(title="Norkyst_v3-800m ... 2026-01-01T00:00:00 - 2026-01-01T23:00:00", title_no="norsk tittel", summary="ROMS", license="CC-BY-4.0")
     ds.to_netcdf(path)
     return m, ds
 
@@ -133,8 +144,11 @@ def test_norkyst_surface_layer_and_window_from_model_run(tmp_path):
         np.testing.assert_allclose(
             got.temperature.values, ds.temperature.isel(depth=0, time=slice(2, None)).values, atol=m.scales["temperature"], equal_nan=True
         )
-        assert "grid_mapping" not in got.temperature.attrs and got.temperature.attrs["units"] == "Celsius"
+        assert got.temperature.attrs["grid_mapping"] == "projection_stere" and got.temperature.attrs["units"] == "Celsius"
+        assert got.projection_stere.attrs["grid_mapping_name"] == "polar_stereographic"
     assert xr.open_zarr(run / "ov.zarr", consolidated=True).temperature.shape[0] == 6
+    assert xr.open_zarr(run / "ov.zarr", consolidated=True).projection_stere.attrs["proj4"].startswith("+proj=stere")
+    assert info["crs"]["grid_mapping"] == "projection_stere" and info["crs"]["attrs"]["straight_vertical_longitude_from_pole"] == 70.0
     assert not list((out / "norkyst800").glob(".*spool*")), "the spool is removed"
 
 
@@ -144,3 +158,49 @@ def test_explicit_hours_override_the_model_window(tmp_path):
     m = dataclasses.replace(m, back_hours=2, map_shard=(1, 64, 64))
     cv.convert(m, tmp_path / "s", url=str(src), run="r1", hours=3)
     assert len(json.loads((tmp_path / "s" / "norkyst800" / "r1" / "dataset.json").read_text())["times"]) == 3
+
+
+def test_projection_and_attributes_are_published(tmp_path, ww3, source):
+    out = tmp_path / "store"
+    cv.convert(ww3, out, url=source, run="r1")
+    run = out / "ww3_4km" / "r1"
+    info = json.loads((run / "dataset.json").read_text())
+    assert info["crs"]["grid_mapping"] == "rotated_pole" and info["crs"]["proj4"].startswith("+proj=ob_tran")
+    assert info["crs"]["attrs"]["grid_north_pole_latitude"] == 22.0
+    assert info["bbox"] == pytest.approx([0.0, 55.0, 20.0, 70.0])
+    assert info["variables"]["hs"] == {"units": "m", "standard_name": "sea_surface_wave_significant_height", "grid_mapping": "rotated_pole"}
+    # the same in every layout: the grid-mapping variable and the references to it
+    for layout in ("map.zarr", "ts.zarr", "ov.zarr"):
+        g = xr.open_zarr(run / layout, consolidated=True)
+        assert g.rotated_pole.attrs["grid_mapping_name"] == "rotated_latitude_longitude" and g.rotated_pole.ndim == 0
+        assert g.hs.attrs["grid_mapping"] == "rotated_pole" and "_ChunkSizes" not in g.hs.attrs
+        assert g.attrs == info["attrs"]
+    a = info["attrs"]
+    # the source's descriptive attributes stay, the ones that describe the source file do not
+    assert a["title"] == "synthetic wave forecast" and a["institution"] == "MET Norway" and a["license"] == "CC-BY-4.0"
+    assert a["Conventions"] == "CF-1.6, ACDD-1.3"
+    assert "id" not in a and "source file history" not in a["history"]
+    assert a["source_url"] == source and a["model_run"] == "2026-01-01T00:00:00Z"
+    assert (a["time_coverage_start"], a["time_coverage_end"]) == ("2026-01-01T00:00:00Z", "2026-01-01T02:00:00Z")
+    assert a["geospatial_lat_min"] == 55.0 and a["geospatial_lon_max"] == 20.0
+    assert a["date_created"] != "2025-01-01T00:00:00Z"
+
+
+def test_model_overrides_and_drops_global_attributes(tmp_path):
+    src = tmp_path / "nk.nc"
+    m, _ = norkyst_source(src)
+    m = dataclasses.replace(m, map_shard=(1, 64, 64))
+    cv.convert(m, tmp_path / "s", url=str(src), run="r1")
+    a = json.loads((tmp_path / "s" / "norkyst800" / "r1" / "dataset.json").read_text())["attrs"]
+    assert a["title"] == m.attrs["title"] and "title_no" not in a and a["summary"] == "ROMS"
+
+
+def test_no_grid_mapping_in_the_source_means_no_crs(tmp_path, ww3):
+    ds = synthetic(ww3).drop_vars("rotated_pole")
+    src = tmp_path / "plain.nc"
+    ds.to_netcdf(src)
+    cv.convert(ww3, tmp_path / "s", url=str(src), run="r1")
+    run = tmp_path / "s" / "ww3_4km" / "r1"
+    assert json.loads((run / "dataset.json").read_text())["crs"] is None
+    g = xr.open_zarr(run / "ts.zarr", consolidated=True)
+    assert "rotated_pole" not in g.variables and "grid_mapping" not in g.hs.attrs

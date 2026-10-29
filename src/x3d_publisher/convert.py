@@ -71,7 +71,7 @@ def write(ds: xr.Dataset, path, chunks: dict, m: Model, shards: dict | None = No
     ds.to_zarr(path, mode="w", zarr_format=3, consolidated=True, encoding=enc)
 
 
-def overview(ds: xr.Dataset, m: Model) -> xr.Dataset:
+def overview(ds: xr.Dataset, m: Model, gm: str | None = None) -> xr.Dataset:
     """Block-mean to 1/ov_factor; a cell needs at least half valid (sea) samples.
 
     Directions (pdir*) are averaged as unit vectors so the 0/360 wrap is handled.
@@ -98,7 +98,7 @@ def overview(ds: xr.Dataset, m: Model) -> xr.Dataset:
         else:
             out[v] = coarse(ds[v], n)
         out[v] = out[v].astype("float32")
-        out[v].attrs = {k: ds[v].attrs[k] for k in ("standard_name", "long_name", "units") if k in ds[v].attrs}
+        out[v].attrs = var_attrs(ds[v].attrs, gm, only=OV_ATTRS)
     return xr.Dataset(out, coords={"time": ds.time}).drop_vars([m.y_dim, m.x_dim])
 
 
@@ -121,7 +121,33 @@ def published_times(base: str) -> list[str] | None:
         return None
 
 
-def write_sidecars(ds: xr.Dataset, out: Path, m: Model) -> None:
+def extent(lat: np.ndarray, lon: np.ndarray) -> dict:
+    """ACDD geospatial bounds of the 2-D latitude/longitude fields."""
+    return {
+        "geospatial_lat_min": float(np.nanmin(lat)), "geospatial_lat_max": float(np.nanmax(lat)),
+        "geospatial_lon_min": float(np.nanmin(lon)), "geospatial_lon_max": float(np.nanmax(lon)),
+    }
+
+
+def global_attrs(src: dict, m: Model, *, name: str, url: str, model_run: str | None, times: list[str], bounds: dict, now: str) -> dict:
+    """Global attributes of the store: the source's (ACDD/CF: title, summary, institution, license, ...) without the
+    ones that describe the source file or its time range, then those that are true of this store."""
+    a = {k: jsonable(v) for k, v in src.items() if k not in DROP_GLOBAL and k not in m.drop_attrs}
+    a.setdefault("title", name)
+    a.setdefault("Conventions", "CF-1.8")
+    a.update(m.attrs)
+    a.update(bounds)
+    a.update(
+        source_url=url, date_created=now, time_coverage_start=times[0], time_coverage_end=times[-1],
+        history=f"{now} x3d-publisher: converted from {url}",
+    )
+    if model_run:
+        a["model_run"] = model_run
+    return a
+
+
+def write_sidecars(ds: xr.Dataset, out: Path, m: Model, meta: dict | None = None) -> None:
+    """grid.bin and dataset.json; `meta` (crs, attrs, variables) is added to dataset.json as it is."""
     ny, nx = ds.sizes[m.y_dim], ds.sizes[m.x_dim]
     s = m.mesh_stride
     iy = np.minimum(np.arange(-(-(ny - 1) // s) + 1) * s, ny - 1)
@@ -129,12 +155,15 @@ def write_sidecars(ds: xr.Dataset, out: Path, m: Model) -> None:
     lon = ds[m.lon].values[np.ix_(iy, ix)].astype("<f4")
     lat = ds[m.lat].values[np.ix_(iy, ix)].astype("<f4")
     (out / "grid.bin").write_bytes(lon.tobytes() + lat.tobytes())
+    b = extent(ds[m.lat].values, ds[m.lon].values)
     (out / "dataset.json").write_text(json.dumps({
         "format_version": FORMAT_VERSION,
         "name": out.parent.name, "run": out.name, "model_run": ds.attrs.get("model_run"),
         "times": to_iso(ds.time.values), "ny": ny, "nx": nx, "dims": {"y": m.y_dim, "x": m.x_dim},
-        "geo": [m.lat, m.lon], "mesh_stride": s, "mesh_ny": len(iy), "mesh_nx": len(ix),
+        "geo": [m.lat, m.lon], "bbox": [b["geospatial_lon_min"], b["geospatial_lat_min"], b["geospatial_lon_max"], b["geospatial_lat_max"]],
+        "mesh_stride": s, "mesh_ny": len(iy), "mesh_nx": len(ix),
         "ov_factor": m.ov_factor, "ov_tchunk": m.ov_tchunk, "ov_vars": m.ov_vars, "scales": m.scales,
+        **(meta or {}),
     }))
 
 
@@ -162,7 +191,42 @@ def batches(ds: xr.Dataset, step: int = 12):
 
 FILL = -32768
 # attributes that point at other variables of the source file, which are not in the store
-DROP_ATTRS = ("grid_mapping", "coordinates", "bounds")
+# (grid_mapping is kept when the mapping variable is published, see `grid_mapping`)
+DROP_ATTRS = ("coordinates", "bounds")
+# global attributes of the source that describe that file (or time range) rather than the store
+DROP_GLOBAL = (
+    "time_coverage_start", "time_coverage_end", "time_coverage_duration", "date_created", "date_modified",
+    "history", "id", "NCO", "Unlimited_Dimension",
+)
+OV_ATTRS = ("standard_name", "long_name", "units")  # what still holds after block-averaging
+
+
+def jsonable(v):
+    """numpy scalars/arrays to plain Python (for dataset.json and attributes)."""
+    if isinstance(v, np.generic):
+        return v.item()
+    if isinstance(v, np.ndarray):
+        return v.tolist()
+    return v
+
+
+def var_attrs(attrs: dict, gm: str | None, only: tuple[str, ...] | None = None) -> dict:
+    """The variable attributes to publish: not the pointers to variables that are not in the store, nor the
+    private (_ChunkSizes) ones; `grid_mapping` only if it names the published grid-mapping variable `gm`."""
+    return {
+        k: jsonable(a) for k, a in attrs.items()
+        if (only is None or k in only or k == "grid_mapping")
+        and k not in DROP_ATTRS and not k.startswith("_") and (k != "grid_mapping" or a == gm)
+    }
+
+
+def grid_mapping(ds: xr.Dataset, names: list[str]) -> str | None:
+    """Name of the CF grid-mapping variable (projection) that the variables refer to, if the source has it."""
+    for v in names:
+        gm = ds[v].attrs.get("grid_mapping") if v in ds else None
+        if gm in ds.variables and ds[gm].ndim == 0:
+            return gm
+    return None
 
 
 def pack(da: xr.DataArray, scale: float) -> np.ndarray:
@@ -185,13 +249,19 @@ class Lazy:
         return np.asarray(self.a[key])
 
 
+def with_attrs(var: xr.Variable, attrs: dict) -> xr.Variable:
+    v = var.copy(deep=False)
+    v.attrs = attrs
+    return v
+
+
 class Spool:
     """The packed (int16) time steps on disk while they are downloaded, so that memory stays bounded and each layout
     is written from local files rather than THREDDS."""
 
-    def __init__(self, directory: Path, names: list[str], n: int, ny: int, nx: int, m: Model):
+    def __init__(self, directory: Path, names: list[str], n: int, ny: int, nx: int, m: Model, gm: str | None = None):
         directory.mkdir(parents=True, exist_ok=True)
-        self.m, self.n, self.names = m, n, names
+        self.m, self.n, self.names, self.gm = m, n, names, gm
         self.arrays = {
             v: np.lib.format.open_memmap(directory / f"{v}.npy", mode="w+", dtype="int16", shape=(n, ny, nx)) for v in names
         }
@@ -203,10 +273,10 @@ class Spool:
         m = self.m
         for v in self.names:
             self.arrays[v][i : i + part.sizes["time"]] = pack(part[v], self.m.scales[v])
-            self.attrs.setdefault(v, {k: a for k, a in part[v].attrs.items() if k not in DROP_ATTRS and not k.startswith("_")})
+            self.attrs.setdefault(v, var_attrs(part[v].attrs, self.gm))
         if self.coords is None:
-            self.coords = {k: part[k].variable for k in (m.y_dim, m.x_dim) if k in part.coords}
-            self.geo = {k: part[k].variable for k in (m.lat, m.lon)}
+            self.coords = {k: with_attrs(part[k].variable, var_attrs(part[k].attrs, self.gm)) for k in (m.y_dim, m.x_dim) if k in part.coords}
+            self.geo = {k: with_attrs(part[k].variable, var_attrs(part[k].attrs, self.gm)) for k in (m.lat, m.lon)}
 
     def flush(self) -> None:
         for a in self.arrays.values():
@@ -251,6 +321,11 @@ def convert(
     ref = m.reference_time
     model_run = to_iso(np.atleast_1d(ds[ref].values))[0] if ref and ref in ds else None
     log.info("latest model run: %s", model_run)
+    gm = grid_mapping(ds, vars)
+    gm_attrs = {k: jsonable(v) for k, v in ds[gm].attrs.items()} if gm else {}
+    src_attrs = dict(ds.attrs)
+    if not gm:
+        log.warning("no grid-mapping variable in the source: the store has no projection information")
     ds = ds[needed + [m.lat, m.lon]]
     if m.select:
         ds = ds.sel(m.select).drop_vars([d for d in m.select if d in ds.coords or d in ds.dims], errors="ignore")
@@ -275,29 +350,37 @@ def convert(
     path.mkdir(parents=True, exist_ok=True)
     spool_dir = root / f".{run}.spool"
     try:
-        spool = Spool(spool_dir, vars, n, ds.sizes[y], ds.sizes[x], m)
+        spool = Spool(spool_dir, vars, n, ds.sizes[y], ds.sizes[x], m, gm)
         per_step = max(1, ds.nbytes // n)
         ov = []
         for i, part in batches(ds, step=max(1, min(12, int(400e6 // per_step)))):
             # the overview is made from the unquantised values, as the exact layouts are
-            ov.append(overview(part, m))
+            ov.append(overview(part, m, gm))
             spool.add(i, part)
         spool.flush()
         times = ds.time.values
         sk = xr.Dataset(spool.geo, coords={"time": times, **spool.coords})
-        attrs = dict(source=url, title=name, **({"model_run": model_run} if model_run else {}))
+        now = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        attrs = global_attrs(
+            src_attrs, m, name=name, url=url, model_run=model_run, times=to_iso(times),
+            bounds=extent(spool.geo[m.lat].values, spool.geo[m.lon].values), now=now,
+        )
+        # the projection as a CF grid-mapping variable (a scalar placeholder: the information is in its attributes)
+        proj = {gm: xr.Variable((), np.int32(0), gm_attrs)} if gm else {}
 
         def layout(chunks):
-            d = spool.dataset(times, chunks)
+            d = spool.dataset(times, chunks).assign_coords(proj)
             d.attrs.update(attrs)
             return d
 
         timed("map.zarr", lambda: write(layout(dict(zip(("time", y, x), m.map_shard))), path / "map.zarr",
                                         {"time": 1, y: m.map_chunk, x: m.map_chunk}, m, dict(zip(("time", y, x), m.map_shard))))
-        ovo = xr.concat(ov, "time", data_vars="minimal", coords="minimal", compat="override")
+        ovo = xr.concat(ov, "time", data_vars="minimal", coords="minimal", compat="override").assign_coords(proj)
+        ovo.attrs.update(attrs)
         ovy, ovx = -(-ds.sizes[y] // m.ov_factor), -(-ds.sizes[x] // m.ov_factor)
         timed("ov.zarr", lambda: write(ovo, path / "ov.zarr", {"time": m.ov_tchunk, y: ovy, x: ovx}, m))
-        write_sidecars(sk.assign_attrs(attrs), path, m)
+        crs = {"grid_mapping": gm, "grid_mapping_name": gm_attrs.get("grid_mapping_name"), "proj4": gm_attrs.get("proj4"), "attrs": gm_attrs} if gm else None
+        write_sidecars(sk.assign_attrs(attrs), path, m, {"crs": crs, "attrs": attrs, "variables": spool.attrs})
         sh = {"time": n, y: m.ts_shard, x: m.ts_shard}
         timed("ts.zarr", lambda: write(layout(sh), path / "ts.zarr", {"time": n, y: m.ts_chunk, x: m.ts_chunk}, m, sh))
     finally:
