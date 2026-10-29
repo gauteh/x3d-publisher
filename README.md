@@ -1,6 +1,6 @@
 # x3d-publisher
 
-Producer of the [x3d](https://github.com/gauteh/x3d) data store for [waves.met.no](https://github.com/gauteh/waves.met.no)
+Producer of the [x3d](https://github.com/gauteh/x3d) data store for [waves.met.no](https://waves.met.no)
 (optimized for both Python and wasm/web access): converts a source dataset (THREDDS OPeNDAP, or anything xarray
 opens) into the Zarr v3 layouts described in x3d's `docs/format.md`, publishes them to S3 (data first,
 metadata later, `latest.json` last) and prunes old runs. x3d itself is a strict client; this package is the
