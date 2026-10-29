@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  # where x3d (the client) lives; for a private repo add a secret X3D_TOKEN (read access to contents)
+  X3D_REPOSITORY: ${{ vars.X3D_REPOSITORY || format('{0}/x3d', github.repository_owner) }}
+  X3D_REF: main
+
+jobs:
+  # Offline: converter, publish/fetch/prune/run against a mocked S3, on a synthetic dataset.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -q -e ".[test]"
+      - run: pytest -v
+
+  # Conformance with the client: build x3d, check the publisher's output reads back through it, then run x3d's own
+  # tests against a store built by this publisher (X3D_TEST_STORE), so format drift on either side fails here.
+  test-x3d:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.X3D_REPOSITORY }}
+          ref: ${{ env.X3D_REF }}
+          token: ${{ secrets.X3D_TOKEN || github.token }}
+          path: x3d-src
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: x3d-src
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -q -e "./x3d-src[test]"   # builds the Rust extension via maturin
+      - run: pip install -q -e ".[test]"
+      - run: pytest -v   # includes reading the store back through x3d
+      - run: python tests/make_store.py store
+      - working-directory: x3d-src
+        env:
+          X3D_CACHE: "0"
+          X3D_TEST_STORE: ${{ github.workspace }}/store/ww3_4km
+        run: pytest -v -m "not rgw" --ignore=tests/test_benchmark.py --ignore=tests/test_microbench.py
