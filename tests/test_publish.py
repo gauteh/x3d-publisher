@@ -79,6 +79,19 @@ def test_publish_headers_and_fetch_roundtrip(tmp_path, ww3, source, s3):
     assert mine == sorted(p.relative_to(tmp_path / "back") for p in (tmp_path / "back").rglob("*") if p.is_file())
 
 
+def test_publish_sets_public_read_only_policy_by_default(tmp_path, ww3, source, s3):
+    publish.publish(converted(tmp_path, ww3, source), "s3://bkt/ww3_4km")
+    actions = {st["Action"] for st in json.loads(s3.get_bucket_policy(Bucket="bkt")["Policy"])["Statement"]}
+    assert actions == {"s3:GetObject", "s3:ListBucket"}
+    assert s3.get_bucket_cors(Bucket="bkt")["CORSRules"][0]["AllowedMethods"] == ["GET", "HEAD"]
+
+
+def test_publish_can_skip_bucket_configuration(tmp_path, ww3, source, s3):
+    publish.publish(converted(tmp_path, ww3, source), "s3://bkt/ww3_4km", configure=False)
+    with pytest.raises(Exception):
+        s3.get_bucket_policy(Bucket="bkt")
+
+
 def test_publish_prunes_old_runs(tmp_path, ww3, source, s3):
     for run in ("r1", "r2", "r3"):
         local = converted(tmp_path, ww3, source, run)

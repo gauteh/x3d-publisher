@@ -13,7 +13,7 @@ only writer. It contains no credentials or bucket names: those are deployment se
 
     x3d-publish models                                   # bundled model configs
     x3d-publish convert ww3_4km --out store --hours 72   # -> store/ww3_4km/<run>/ + latest.json
-    x3d-publish publish store/ww3_4km s3://BUCKET/ww3_4km --endpoint-url URL --keep 3 [--configure-bucket]
+    x3d-publish publish store/ww3_4km s3://BUCKET/ww3_4km --endpoint-url URL --keep 3 [--no-configure-bucket]
     x3d-publish fetch s3://BUCKET/ww3_4km local/ww3_4km  # the inverse (anonymous by default)
     x3d-publish serve store 8000                         # local S3 stand-in over HTTP (CORS, Range, cache headers)
     x3d-publish run ww3_4km --bucket-url s3://BUCKET     # convert -> publish -> prune, in a scratch dir
@@ -22,7 +22,23 @@ only writer. It contains no credentials or bucket names: those are deployment se
 `--published-url`, default `<endpoint>/<bucket>`) already has the same time steps; `--force` converts anyway.
 Credentials are the usual AWS environment (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, ...); how they are
 found is up to the caller (for MET: `../devops/ppi`). Env equivalents: `S3_BUCKET_URL`, `S3_ENDPOINT_URL`,
-`PUBLISHED_URL`, `KEEP_RUNS`, `HOURS`, `WORKERS`, `WORK`, `FORCE`, `CONFIGURE_BUCKET`.
+`PUBLISHED_URL`, `KEEP_RUNS`, `HOURS`, `WORKERS`, `WORK`, `FORCE`, `CONFIGURE_BUCKET` (default on).
+
+## Creating a bucket
+
+`publish` and `run` need an existing bucket; they do not create it. With s3cmd (credentials in `s3cfg`, for MET
+see `../devops/storage-met-s3`; bucket names must be DNS-compatible: lowercase, dashes, no underscores):
+
+    s3cmd -c s3cfg mb s3://norkyst800m-v3
+    x3d-publish run norkyst800 --bucket-url s3://norkyst800m-v3 --endpoint-url https://rgw.met.no
+
+On every publish the bucket is made readable by everyone and read-only: the policy allows only anonymous
+`s3:GetObject` and `s3:ListBucket`, writes need credentials. CORS allows `GET`/`HEAD` with `Range` from any origin
+(needed for browsers). `--no-configure-bucket` (or `CONFIGURE_BUCKET=0`) skips this, and a failure to set it
+(credentials without policy rights) is a warning, not an error. Check it with
+`s3cmd -c s3cfg info s3://norkyst800m-v3` (policy, CORS) or `curl <endpoint>/<project>:<bucket>/norkyst800/latest.json`.
+The public URL is `<endpoint>/<project-id>:<bucket>/<prefix>`, which is what x3d opens:
+`xr.open_dataset("x3d+https://rgw.met.no/<project-id>:norkyst800m-v3/norkyst800")`.
 
 ## Models
 

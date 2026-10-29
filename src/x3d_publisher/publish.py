@@ -7,7 +7,8 @@ than the grace period are never removed (clients may still hold a cached latest.
 
 Credentials come from the usual AWS environment/config. The bucket needs public read (GetObject,
 ListBucket) and a CORS rule allowing GET/HEAD with the Range header; `configure_bucket` sets both
-(or do it in your own IaC).
+(or do it in your own IaC). `publish` and `run` do this by default (idempotent; `--no-configure-bucket` to skip),
+but the bucket itself must exist: create it first, e.g. `s3cmd -c s3cfg mb s3://BUCKET`.
 """
 from __future__ import annotations
 
@@ -46,7 +47,7 @@ def configure_bucket(s3, bucket: str) -> None:
 
 def publish(
     src, dest: str, *, endpoint_url: str | None = None, keep: int | None = None, grace_hours: float = 6,
-    dry_run: bool = False, run: str | None = None, configure: bool = False, workers: int = 8, s3=None,
+    dry_run: bool = False, run: str | None = None, configure: bool = True, workers: int = 8, s3=None,
 ) -> str:
     """Upload run `run` (default: the one in <src>/latest.json) of the local store `src` to `dest` (s3://bucket/prefix)."""
     import boto3
@@ -56,7 +57,10 @@ def publish(
     bucket, prefix = split(dest)
     s3 = s3 or boto3.client("s3", endpoint_url=endpoint_url)
     if configure:
-        configure_bucket(s3, bucket)
+        try:
+            configure_bucket(s3, bucket)
+        except Exception as e:  # e.g. credentials without bucket-policy rights; the bucket may be set up already
+            print(f"warning: could not set the public-read policy/CORS on s3://{bucket}: {e}", flush=True)
 
     def put(path: Path, key: str, cache: str):
         ctype = "application/json" if path.suffix == ".json" else mimetypes.guess_type(path.name)[0] or "application/octet-stream"

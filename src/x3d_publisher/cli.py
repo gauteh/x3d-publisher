@@ -139,7 +139,7 @@ def parser() -> argparse.ArgumentParser:
     u.add_argument("--grace-hours", type=float, default=6, help="never prune runs younger than this")
     u.add_argument("--dry-run", action="store_true", help="only list what --keep would delete")
     u.add_argument("--run", help="run to publish (default: the one in latest.json)")
-    u.add_argument("--configure-bucket", action="store_true", help="set public-read policy and CORS (GET/HEAD, Range) on the bucket")
+    u.add_argument("--configure-bucket", action=argparse.BooleanOptionalAction, default=True, help="set public-read policy and CORS (GET/HEAD, Range) on the bucket (default on)")
     u.add_argument("--workers", type=int, default=8)
     u.set_defaults(fn=cmd_publish)
 
@@ -159,7 +159,7 @@ def parser() -> argparse.ArgumentParser:
     r.add_argument("--published-url", default=env("PUBLISHED_URL"), help="public base URL of the bucket, to skip up-to-date runs (default: <endpoint>/<bucket>)")
     r.add_argument("--force", action="store_true", default=bool(env("FORCE")), help="convert even if the published store is up to date ($FORCE)")
     r.add_argument("--keep", type=int, default=int(env("KEEP_RUNS", 3)), help="runs to keep (default 3, or $KEEP_RUNS)")
-    r.add_argument("--configure-bucket", action="store_true", default=bool(env("CONFIGURE_BUCKET")))
+    r.add_argument("--configure-bucket", action=argparse.BooleanOptionalAction, default=env("CONFIGURE_BUCKET", "1") not in ("", "0"), help="set public-read policy and CORS on the bucket (default on, or $CONFIGURE_BUCKET=0 to skip)")
     r.add_argument("--work", default=env("WORK", tempfile.gettempdir() + "/x3d-publisher"), help="scratch parent directory ($WORK)")
     r.add_argument("--upload-workers", type=int, default=8)
     r.set_defaults(fn=cmd_run)
