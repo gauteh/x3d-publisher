@@ -1,11 +1,12 @@
 # x3d-publisher
 
-Producer of the [x3d](../x3d) data store: converts a source dataset (THREDDS OPeNDAP, or anything xarray
+Producer of the [x3d](https://github.com/gauteh/x3d) data store for [waves.met.no](https://github.com/gauteh/waves.met.no)
+(optimized for both Python and wasm/web access): converts a source dataset (THREDDS OPeNDAP, or anything xarray
 opens) into the Zarr v3 layouts described in x3d's `docs/format.md`, publishes them to S3 (data first,
 metadata later, `latest.json` last) and prunes old runs. x3d itself is a strict client; this package is the
 only writer. It contains no credentials or bucket names: those are deployment settings.
 
-    mamba activate x3d                       # the x3d environment (../x3d/environment.yml) has everything
+    mamba activate x3d                       # the x3d environment (`environment.yml` in x3d) has everything
     pip install -e . --no-deps               # x3d-publish on PATH
     pytest
 
@@ -21,13 +22,12 @@ only writer. It contains no credentials or bucket names: those are deployment se
 `run` is the cron/CronJob entrypoint. It exits 0 without publishing when the published store (checked over
 `--published-url`, default `<endpoint>/<bucket>`) already has the same time steps; `--force` converts anyway.
 Credentials are the usual AWS environment (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, ...); how they are
-found is up to the caller (for MET: `../devops/ppi`). Env equivalents: `S3_BUCKET_URL`, `S3_ENDPOINT_URL`,
+found is up to the caller. Env equivalents: `S3_BUCKET_URL`, `S3_ENDPOINT_URL`,
 `PUBLISHED_URL`, `KEEP_RUNS`, `HOURS`, `WORKERS`, `WORK`, `FORCE`, `CONFIGURE_BUCKET` (default on).
 
 ## Creating a bucket
 
-`publish` and `run` need an existing bucket; they do not create it. With s3cmd (credentials in `s3cfg`, for MET
-see `../devops/storage-met-s3`; bucket names must be DNS-compatible: lowercase, dashes, no underscores):
+`publish` and `run` need an existing bucket; they do not create it. With s3cmd (credentials in `s3cfg`; bucket names must be DNS-compatible: lowercase, dashes, no underscores):
 
     s3cmd -c s3cfg mb s3://norkyst800m-v3
     x3d-publish run norkyst800 --bucket-url s3://norkyst800m-v3 --endpoint-url https://rgw.met.no
@@ -44,8 +44,7 @@ The public URL is `<endpoint>/<project-id>:<bucket>/<prefix>`, which is what x3d
 
 A model is one TOML file in `src/x3d_publisher/models/` (or any path given instead of the name): source URL,
 dimension names, variables, overview variables, `int16` scale factors and the layout parameters. `ww3_4km`
-and `norkyst800` (NorKyst v3 surface layer, latest run plus 48 h back) are bundled; adding a model means adding a file. The output of `ww3_4km` is byte-identical to what
-`wave-world/pipeline/convert.py` wrote, plus `format_version`, `dims` and `geo` in `dataset.json`.
+and `norkyst800` (NorKyst v3 surface layer, latest run plus 48 h back) are bundled; adding a model means adding a file. The output of `ww3_4km` is byte-identical to what the original waves.met.no pipeline wrote, plus `format_version`, `dims` and `geo` in `dataset.json`.
 
 ## Tests
 
@@ -55,5 +54,5 @@ S3 (moto), the `run` cycle, and (`x3d` is in the same environment) reading the r
 ## Not done yet
 
 - NorKyst-800 (`norkyst800` prefix, surface layer): a model file plus int16 packing while downloading.
-- `Dockerfile` / CronJob for k8s (wave-world still has `Dockerfile.pipeline`).
+- `Dockerfile` / CronJob for k8s.
 - CI.
