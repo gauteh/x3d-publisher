@@ -209,7 +209,8 @@ class Spool:
         data = {}
         for v, a in self.arrays.items():
             ch = tuple(min(chunks[d], n) for d, n in zip(dims, a.shape))
-            lazy = da.from_array(a, chunks=ch, name=False).map_blocks(unpack, m.scales[v], dtype="float32")
+            # lock: stops dask from copying the whole memmap into memory
+            lazy = da.from_array(a, chunks=ch, name=False, lock=True).map_blocks(unpack, m.scales[v], dtype="float32")
             data[v] = xr.DataArray(lazy, dims=dims, attrs=self.attrs[v])
         for k, var in self.geo.items():
             data[k] = xr.DataArray(var)
