@@ -175,6 +175,16 @@ def unpack(a: np.ndarray, scale: float) -> np.ndarray:
     return np.where(a == FILL, np.float32("nan"), a.astype("float32") * np.float32(scale))
 
 
+class Lazy:
+    """Array-like view of a memmap; dask copies real ndarrays (memmaps included) into memory in from_array."""
+
+    def __init__(self, a: np.ndarray):
+        self.a, self.shape, self.dtype, self.ndim = a, a.shape, a.dtype, a.ndim
+
+    def __getitem__(self, key):
+        return np.asarray(self.a[key])
+
+
 class Spool:
     """The packed (int16) time steps on disk while they are downloaded, so that memory stays bounded and each layout
     is written from local files rather than THREDDS."""
@@ -209,8 +219,7 @@ class Spool:
         data = {}
         for v, a in self.arrays.items():
             ch = tuple(min(chunks[d], n) for d, n in zip(dims, a.shape))
-            # lock: stops dask from copying the whole memmap into memory
-            lazy = da.from_array(a, chunks=ch, name=False, lock=True).map_blocks(unpack, m.scales[v], dtype="float32")
+            lazy = da.from_array(Lazy(a), chunks=ch, name=False).map_blocks(unpack, m.scales[v], dtype="float32")
             data[v] = xr.DataArray(lazy, dims=dims, attrs=self.attrs[v])
         for k, var in self.geo.items():
             data[k] = xr.DataArray(var)
