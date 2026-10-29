@@ -1,0 +1,38 @@
+# NorKyst-800 v3 (MET Norway / IMR ROMS, 800 m): surface layer of current, wind and temperature.
+# The best-time-series aggregate stitches the newest runs together (hourly, 5 days ahead).
+# No credentials or bucket names belong here: where to publish is a deployment matter.
+name = "norkyst800"
+url = "https://thredds.met.no/thredds/dodsC/fou-hi/norkystv3_800m_m00_be"
+# window: from this many hours before the newest model run (forecast_reference_time) to the end of the forecast
+back_hours = 48
+
+# source names; the grid is polar stereographic (X/Y in metres) with 2-D lat/lon
+y_dim = "Y"
+x_dim = "X"
+lat = "lat"
+lon = "lon"
+reference_time = "forecast_reference_time"
+
+# the surface layer
+select = { depth = 0.0 }
+
+vars = ["u_eastward", "v_northward", "temperature", "Uwind_eastward", "Vwind_northward"]
+ov_vars = ["u_eastward", "v_northward", "temperature", "Uwind_eastward", "Vwind_northward"]
+
+[layout]
+zstd_level = 5
+map_chunk = 256            # inner chunk edge of map.zarr
+map_shard = [1, 1280, 2816] # (time, y, x): the whole grid for one time step
+ts_chunk = 16              # inner chunk edge of ts.zarr (all time steps)
+ts_shard = 128
+ov_factor = 4              # overview = block means at 1/ov_factor resolution
+ov_tchunk = 24
+mesh_stride = 8            # decimation of grid.bin (viewer geometry)
+
+# int16 packing: precision = scale_factor (about 2x smaller than float32 before compression)
+[scales]
+u_eastward = 0.001         # m/s
+v_northward = 0.001
+temperature = 0.001        # degC
+Uwind_eastward = 0.01      # m/s
+Vwind_northward = 0.01

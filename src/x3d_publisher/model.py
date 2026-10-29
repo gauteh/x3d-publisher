@@ -22,6 +22,11 @@ class Model:
     lon: str = "longitude"
     reference_time: str | None = None
     hours: int = 72
+    # forecast sources: start this many hours before the newest model run (reference_time) and keep everything after it;
+    # overrides `hours` unless --hours/--start is given
+    back_hours: int | None = None
+    # fixed selections on other dimensions, e.g. {depth = 0.0} for the surface layer
+    select: dict = field(default_factory=dict)
     zstd_level: int = 5
     map_chunk: int = 256
     map_shard: tuple[int, int, int] = (1, 1280, 768)

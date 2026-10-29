@@ -28,8 +28,8 @@ found is up to the caller (for MET: `../devops/ppi`). Env equivalents: `S3_BUCKE
 
 A model is one TOML file in `src/x3d_publisher/models/` (or any path given instead of the name): source URL,
 dimension names, variables, overview variables, `int16` scale factors and the layout parameters. `ww3_4km`
-is bundled; adding a model means adding a file. The output of `ww3_4km` is byte-identical to what
-`wave-world/pipeline/convert.py` wrote, plus `format_version` and `dims` in `dataset.json`.
+and `norkyst800` (NorKyst v3 surface layer, latest run plus 48 h back) are bundled; adding a model means adding a file. The output of `ww3_4km` is byte-identical to what
+`wave-world/pipeline/convert.py` wrote, plus `format_version`, `dims` and `geo` in `dataset.json`.
 
 ## Tests
 
