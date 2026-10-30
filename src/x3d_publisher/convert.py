@@ -324,9 +324,11 @@ def open_files(m: Model, needed: list[str]) -> tuple[xr.Dataset, str]:
     files = [f for r in runs for f in sorted(found[r])]  # AN sorts before FC_0001, FC_0002, ...
     log.info("model runs %s: %d files", ", ".join(runs), len(files))
     newest = np.datetime64(dt.datetime.strptime(runs[-1], "%Y%m%dT%HZ"), "ns")
+    # one chunk per time step and selected level (e.g. the surface): a chunk is never a whole 3-D field
+    chunks = {"time": 1, **{d: 1 for d in m.select}}
     ds = retry(lambda: xr.open_mfdataset(
         files, combine="nested", concat_dim="time", data_vars="minimal", coords="minimal", compat="override",
-        chunks={"time": 1}, attrs_file=files[-1], decode_times=True,
+        chunks=chunks, attrs_file=files[-1], decode_times=True,
     ), "open files")
     # overlapping steps (the re-analysis of a new run vs. the forecast of the previous one): keep the last
     t = ds.time.values

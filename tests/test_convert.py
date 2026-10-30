@@ -227,6 +227,8 @@ def test_files_source_joins_runs_and_the_newest_wins(tmp_path):
     assert len(info["times"]) == 8 and info["model_run"] == "2026-01-01T00:00:00Z"
     assert "source_url" not in info["attrs"] and "nk_his_zdepth" in info["attrs"]["history"]
     got = xr.open_zarr(out / "norkyst800" / "r1" / "ts.zarr", consolidated=True).temperature.values
+    # chunks never span the levels: only the surface is read from the files
+    assert set(cv.open_files(m, m.vars)[0].temperature.chunksizes["depth"]) == {1}
     want = ds.temperature.isel(depth=0).values.copy()
     want[2:] += 10  # steps from the newest run: its AN (2..4) over the old forecast, then its forecast
     np.testing.assert_allclose(got, want, atol=m.scales["temperature"], equal_nan=True)
