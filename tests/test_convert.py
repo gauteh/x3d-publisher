@@ -232,3 +232,16 @@ def test_files_source_joins_runs_and_the_newest_wins(tmp_path):
     want = ds.temperature.isel(depth=0).values.copy()
     want[2:] += 10  # steps from the newest run: its AN (2..4) over the old forecast, then its forecast
     np.testing.assert_allclose(got, want, atol=m.scales["temperature"], equal_nan=True)
+
+
+def test_overview_can_be_packed_coarser_than_the_full_layouts(tmp_path):
+    src = tmp_path / "nk.nc"
+    m, _ = norkyst_source(src)
+    m = dataclasses.replace(m, back_hours=2, map_shard=(1, 64, 64), ov_scales={"Uwind_eastward": 0.1})
+    cv.convert(m, tmp_path / "s", url=str(src), run="r1")
+    run = tmp_path / "s" / "norkyst800" / "r1"
+    info = json.loads((run / "dataset.json").read_text())
+    assert info["scales"]["Uwind_eastward"] == 0.01 and info["ov_scales"]["Uwind_eastward"] == 0.1
+    assert info["ov_scales"]["temperature"] == m.scales["temperature"]
+    for layout, want in (("ov.zarr", 0.1), ("map.zarr", 0.01), ("ts.zarr", 0.01)):
+        assert xr.open_zarr(run / layout, consolidated=True).Uwind_eastward.encoding["scale_factor"] == want

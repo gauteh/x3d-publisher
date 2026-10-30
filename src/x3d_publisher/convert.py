@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import datetime as dt
 import glob
+import dataclasses
 import json
 import logging
 import os
@@ -167,6 +168,7 @@ def write_sidecars(ds: xr.Dataset, out: Path, m: Model, meta: dict | None = None
         "geo": [m.lat, m.lon], "bbox": [b["geospatial_lon_min"], b["geospatial_lat_min"], b["geospatial_lon_max"], b["geospatial_lat_max"]],
         "mesh_stride": s, "mesh_ny": len(iy), "mesh_nx": len(ix),
         "ov_factor": m.ov_factor, "ov_tchunk": m.ov_tchunk, "ov_vars": m.ov_vars, "scales": m.scales,
+        "ov_scales": {v: m.ov_scales.get(v, m.scales[v]) for v in m.ov_vars},
         **(meta or {}),
     }))
 
@@ -445,7 +447,8 @@ def convert(
         ovo = xr.concat(ov, "time", data_vars="minimal", coords="minimal", compat="override").assign_coords(proj)
         ovo.attrs.update(attrs)
         ovy, ovx = -(-ds.sizes[y] // m.ov_factor), -(-ds.sizes[x] // m.ov_factor)
-        timed("ov.zarr", lambda: write(ovo, path / "ov.zarr", {"time": m.ov_tchunk, y: ovy, x: ovx}, m))
+        ov_model = dataclasses.replace(m, scales={**m.scales, **m.ov_scales})
+        timed("ov.zarr", lambda: write(ovo, path / "ov.zarr", {"time": m.ov_tchunk, y: ovy, x: ovx}, ov_model))
         crs = {"grid_mapping": gm, "grid_mapping_name": gm_attrs.get("grid_mapping_name"), "proj4": gm_attrs.get("proj4"), "attrs": gm_attrs} if gm else None
         write_sidecars(sk.assign_attrs(attrs), path, m, {"crs": crs, "attrs": attrs, "variables": spool.attrs})
         sh = {"time": n, y: m.ts_shard, x: m.ts_shard}

@@ -15,6 +15,8 @@ class Model:
     vars: list[str]
     ov_vars: list[str]
     scales: dict[str, float]
+    # coarser packing of the overview only (ov.zarr): variable -> scale_factor; the others use `scales`
+    ov_scales: dict[str, float] = field(default_factory=dict)
     # the source: an OPeNDAP/zarr/netCDF URL, or `files` (a glob of netCDF files, e.g. on a shared file system) holding
     # the newest `files_runs` model runs, each split in files that are joined along time; later runs win where they overlap
     url: str | None = None
@@ -54,6 +56,7 @@ class Model:
         d = dict(d)
         layout = d.pop("layout", {})
         d["scales"] = d.pop("scales", {})
+        d["ov_scales"] = d.pop("ov_scales", {})
         known = set(cls.__dataclass_fields__) - {"extra"}
         params = {k: v for k, v in {**d, **layout}.items() if k in known}
         if "drop_attrs" in params:
@@ -66,6 +69,9 @@ class Model:
         missing = [v for v in dict.fromkeys(m.vars + m.ov_vars) if v not in m.scales]
         if missing:
             raise ValueError(f"model {m.name}: no scale for {missing}")
+        stray = [v for v in m.ov_scales if v not in m.ov_vars]
+        if stray:
+            raise ValueError(f"model {m.name}: ov_scales for variables that are not in ov_vars: {stray}")
         return m
 
 
