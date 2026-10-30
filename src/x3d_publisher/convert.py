@@ -21,6 +21,7 @@ import datetime as dt
 import glob
 import json
 import logging
+import os
 import re
 import shutil
 import time
@@ -82,7 +83,8 @@ def overview(ds: xr.Dataset, m: Model, gm: str | None = None) -> xr.Dataset:
     win = {m.y_dim: f, m.x_dim: f}
 
     def count(da):
-        return da.notnull().reset_coords(drop=True).coarsen(win, boundary="pad").sum()
+        # float32, not bool: padding a bool array with NaN makes it an object array (8 bytes per cell)
+        return da.notnull().astype("float32").reset_coords(drop=True).coarsen(win, boundary="pad").sum()
 
     def coarse(da, n):
         s = da.reset_coords(drop=True).coarsen(win, boundary="pad").sum().astype("float64")
@@ -182,13 +184,22 @@ def retry(fn, what="request", tries=4):
             time.sleep(wait)
 
 
+def memory() -> str:
+    """Resident memory of this process (anonymous and file-backed), for the progress log; empty off Linux."""
+    try:
+        kb = {k: int(v.split()[0]) for k, v in (l.split(":", 1) for l in open("/proc/self/status")) if k in ("VmRSS", "VmHWM", "RssAnon", "RssFile")}
+        return f", memory {kb['VmRSS'] // 1024} MB (anon {kb['RssAnon'] // 1024}, file {kb['RssFile'] // 1024}; peak {kb['VmHWM'] // 1024})"
+    except (OSError, KeyError, ValueError):
+        return ""
+
+
 def batches(ds: xr.Dataset, step: int = 12):
     """The dataset a few time steps at a time (progress is visible, retries are cheap and memory is bounded)."""
     n, t0 = ds.sizes["time"], time.time()
     for i in range(0, n, step):
         yield i, retry(ds.isel(time=slice(i, i + step)).load, f"load steps {i}-{min(i + step, n) - 1}")
         done = min(i + step, n)
-        log.info("downloaded %d/%d time steps (%.0f%%, %.0fs elapsed)", done, n, 100 * done / n, time.time() - t0)
+        log.info("downloaded %d/%d time steps (%.0f%%, %.0fs elapsed%s)", done, n, 100 * done / n, time.time() - t0, memory())
 
 
 FILL = -32768
@@ -264,9 +275,14 @@ class Spool:
     def __init__(self, directory: Path, names: list[str], n: int, ny: int, nx: int, m: Model, gm: str | None = None):
         directory.mkdir(parents=True, exist_ok=True)
         self.m, self.n, self.names, self.gm = m, n, names, gm
-        self.arrays = {
-            v: np.lib.format.open_memmap(directory / f"{v}.npy", mode="w+", dtype="int16", shape=(n, ny, nx)) for v in names
-        }
+        self.paths, self.offsets, self.fds, self.step_bytes = {}, {}, {}, ny * nx * 2
+        for v in names:
+            self.paths[v] = directory / f"{v}.npy"
+            mm = np.lib.format.open_memmap(self.paths[v], mode="w+", dtype="int16", shape=(n, ny, nx))
+            self.offsets[v] = mm.offset
+            del mm
+            self.fds[v] = os.open(self.paths[v], os.O_WRONLY)
+        self.arrays: dict[str, np.ndarray] = {}
         self.attrs: dict[str, dict] = {}
         self.coords: dict | None = None
         self.geo: dict = {}
@@ -274,15 +290,23 @@ class Spool:
     def add(self, i: int, part: xr.Dataset) -> None:
         m = self.m
         for v in self.names:
-            self.arrays[v][i : i + part.sizes["time"]] = pack(part[v], self.m.scales[v])
+            data = np.ascontiguousarray(pack(part[v], self.m.scales[v]))
+            fd = self.fds[v]
+            os.pwrite(fd, memoryview(data).cast("B"), self.offsets[v] + i * self.step_bytes)
+            # written through and dropped from the page cache: the spool must not count against the job's memory
+            os.fsync(fd)
+            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
             self.attrs.setdefault(v, var_attrs(part[v].attrs, self.gm))
         if self.coords is None:
             self.coords = {k: with_attrs(part[k].variable, var_attrs(part[k].attrs, self.gm)) for k in (m.y_dim, m.x_dim) if k in part.coords}
             self.geo = {k: with_attrs(part[k].variable, var_attrs(part[k].attrs, self.gm)) for k in (m.lat, m.lon)}
 
     def flush(self) -> None:
-        for a in self.arrays.values():
-            a.flush()
+        """All steps written: from here on the spool is read (memory-mapped, read-only)."""
+        for fd in self.fds.values():
+            os.close(fd)
+        self.fds = {}
+        self.arrays = {v: np.load(p, mmap_mode="r") for v, p in self.paths.items()}
 
     def dataset(self, times: np.ndarray, chunks: dict) -> xr.Dataset:
         """Lazy float32 dataset (decoded on the fly) with dask chunks `chunks` (dimension -> size)."""
