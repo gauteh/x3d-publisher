@@ -204,3 +204,29 @@ def test_no_grid_mapping_in_the_source_means_no_crs(tmp_path, ww3):
     assert json.loads((run / "dataset.json").read_text())["crs"] is None
     g = xr.open_zarr(run / "ts.zarr", consolidated=True)
     assert "rotated_pole" not in g.variables and "grid_mapping" not in g.hs.attrs
+
+
+def test_files_source_joins_runs_and_the_newest_wins(tmp_path):
+    m, ds = norkyst_source(tmp_path / "full.nc")
+    d = tmp_path / "files"
+    d.mkdir()
+    # run 1: re-analysis (AN) then forecast pieces; run 2 re-analyses steps 2..4 (changed values) and forecasts on
+    pieces = {"20251231T00Z": {"AN": (0, 3), "FC_0001": (3, 6)}, "20260101T00Z": {"AN": (2, 5), "FC_0001": (5, 8)}}
+    for run, parts in pieces.items():
+        for part, (a, b) in parts.items():
+            piece = ds.isel(time=slice(a, b))
+            if run == "20260101T00Z":
+                piece = piece.assign(temperature=piece.temperature + 10)
+            piece.to_netcdf(d / f"nk_his_zdepth_{run}_m00_{part}.nc")
+    (d / "nk_his_zdepth_20251230T00Z_m00_AN.nc").write_bytes(b"")  # too old: not among the newest runs
+    m = dataclasses.replace(m, url=None, files=str(d / "nk_his_zdepth_*_m00_*.nc"), files_runs=2, files_min_age=0,
+                            back_hours=None, hours=8, map_shard=(1, 64, 64))
+    out = tmp_path / "store"
+    assert cv.convert(m, out, run="r1") == 0
+    info = json.loads((out / "norkyst800" / "r1" / "dataset.json").read_text())
+    assert len(info["times"]) == 8 and info["model_run"] == "2026-01-01T00:00:00Z"
+    assert "source_url" not in info["attrs"] and "nk_his_zdepth" in info["attrs"]["history"]
+    got = xr.open_zarr(out / "norkyst800" / "r1" / "ts.zarr", consolidated=True).temperature.values
+    want = ds.temperature.isel(depth=0).values.copy()
+    want[2:] += 10  # steps from the newest run: its AN (2..4) over the old forecast, then its forecast
+    np.testing.assert_allclose(got, want, atol=m.scales["temperature"], equal_nan=True)

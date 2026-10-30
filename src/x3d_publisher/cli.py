@@ -50,7 +50,7 @@ def cmd_serve(a) -> int:
 def cmd_models(a) -> int:
     for n in models.bundled():
         m = models.load(n)
-        print(f"{n}: {m.url}")
+        print(f"{n}: {m.url or m.files}")
     return 0
 
 

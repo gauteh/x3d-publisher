@@ -23,3 +23,4 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["lustre: compares the model files on /lustre with THREDDS (skipped where they are not available)"]

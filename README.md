@@ -44,7 +44,7 @@ The public URL is `<endpoint>/<project-id>:<bucket>/<prefix>`, which is what x3d
 
 A model is one TOML file in `src/x3d_publisher/models/` (or any path given instead of the name): source URL,
 dimension names, variables, overview variables, `int16` scale factors and the layout parameters. `ww3_4km`
-and `norkyst800` (NorKyst v3 surface layer, latest run plus 48 h back) are bundled; adding a model means adding a file. The output of `ww3_4km` is byte-identical to what the original waves.met.no pipeline wrote, plus `format_version`, `dims` and `geo` in `dataset.json`.
+and `norkyst800` (NorKyst v3 surface layer, latest run plus 48 h back) are bundled; adding a model means adding a file. `norkyst800_lustre` is the same store read from the model's output files on a shared file system instead of THREDDS: `files` is a glob, the run is parsed from the file name (`files_run_regex`), the newest `files_runs` runs are joined along time (re-analysis `AN` and forecast `FC_*` pieces, the newest run wins where they overlap) and files modified in the last 5 minutes are skipped. A model has either `url` or `files`. The output of `ww3_4km` is byte-identical to what the original waves.met.no pipeline wrote, plus `format_version`, `dims` and `geo` in `dataset.json`.
 
 ## Tests
 

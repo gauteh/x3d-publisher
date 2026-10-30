@@ -18,8 +18,10 @@ xarray/zarr-python, zarrs and others read it directly. See x3d's docs/format.md.
 from __future__ import annotations
 
 import datetime as dt
+import glob
 import json
 import logging
+import re
 import shutil
 import time
 import urllib.request
@@ -129,7 +131,7 @@ def extent(lat: np.ndarray, lon: np.ndarray) -> dict:
     }
 
 
-def global_attrs(src: dict, m: Model, *, name: str, url: str, model_run: str | None, times: list[str], bounds: dict, now: str) -> dict:
+def global_attrs(src: dict, m: Model, *, name: str, url: str, model_run: str | None, times: list[str], bounds: dict, now: str, link: bool = True) -> dict:
     """Global attributes of the store: the source's (ACDD/CF: title, summary, institution, license, ...) without the
     ones that describe the source file or its time range, then those that are true of this store."""
     a = {k: jsonable(v) for k, v in src.items() if k not in DROP_GLOBAL and k not in m.drop_attrs}
@@ -137,10 +139,10 @@ def global_attrs(src: dict, m: Model, *, name: str, url: str, model_run: str | N
     a.setdefault("Conventions", "CF-1.8")
     a.update(m.attrs)
     a.update(bounds)
-    a.update(
-        source_url=url, date_created=now, time_coverage_start=times[0], time_coverage_end=times[-1],
-        history=f"{now} x3d-publisher: converted from {url}",
-    )
+    a.update(source_url=url, date_created=now, time_coverage_start=times[0], time_coverage_end=times[-1],
+             history=f"{now} x3d-publisher: converted from {url}")
+    if not link:  # a file collection: no URL to point to
+        del a["source_url"]
     if model_run:
         a["model_run"] = model_run
     return a
@@ -303,6 +305,38 @@ def timed(label, fn, *args, **kw):
     log.info("wrote %s in %.1fs", label, time.time() - t0)
 
 
+def open_files(m: Model, needed: list[str]) -> tuple[xr.Dataset, str]:
+    """The newest `m.files_runs` model runs of the files matching `m.files`, joined along time (like a THREDDS
+    joinExisting aggregation). Where runs overlap the newest wins. Returns the dataset (lazy) and a source description.
+    Files younger than `m.files_min_age` seconds are skipped: they may still be written."""
+    found: dict[str, list[str]] = {}
+    for f in sorted(glob.glob(m.files)):
+        mt = re.search(m.files_run_regex, Path(f).name)
+        if not mt:
+            continue
+        if time.time() - Path(f).stat().st_mtime < m.files_min_age:
+            log.warning("skipping %s: modified in the last %.0f s", f, m.files_min_age)
+            continue
+        found.setdefault(mt.group(1), []).append(f)
+    if not found:
+        raise SystemExit(f"no files matching {m.files} (run id by {m.files_run_regex!r})")
+    runs = sorted(found)[-m.files_runs:]
+    files = [f for r in runs for f in sorted(found[r])]  # AN sorts before FC_0001, FC_0002, ...
+    log.info("model runs %s: %d files", ", ".join(runs), len(files))
+    newest = np.datetime64(dt.datetime.strptime(runs[-1], "%Y%m%dT%HZ"), "ns")
+    ds = retry(lambda: xr.open_mfdataset(
+        files, combine="nested", concat_dim="time", data_vars="minimal", coords="minimal", compat="override",
+        chunks={"time": 1}, attrs_file=files[-1], decode_times=True,
+    ), "open files")
+    # overlapping steps (the re-analysis of a new run vs. the forecast of the previous one): keep the last
+    t = ds.time.values
+    order = np.argsort(t, kind="stable")
+    keep = np.append(t[order][1:] != t[order][:-1], True)
+    ds = ds.isel(time=order[keep])
+    ds[m.reference_time or "forecast_reference_time"] = ((), newest)
+    return ds, f"{Path(m.files).name} ({len(files)} files, runs {runs[0]} .. {runs[-1]})"
+
+
 def convert(
     m: Model, out, *, url: str | None = None, name: str | None = None, start: str | None = None,
     hours: int | None = None, run: str | None = None, vars: list[str] | None = None,
@@ -312,10 +346,17 @@ def convert(
     # shared login nodes cap threads per user: keep dask/zarr/asyncio pools small
     dask.config.set(scheduler="threads", num_workers=workers)
     zarr.config.set({"async.concurrency": workers, "threading.max_workers": workers})
-    name, url, vars = name or m.name, url or m.url, vars or m.vars
-    log.info("opening %s", url)
-    ds = retry(lambda: xr.open_dataset(url, decode_times=True), "open dataset")
+    name, vars = name or m.name, vars or m.vars
     needed = list(dict.fromkeys(vars + m.ov_vars))
+    link = True
+    if url or not m.files:
+        url = url or m.url
+        log.info("opening %s", url)
+        ds = retry(lambda: xr.open_dataset(url, decode_times=True), "open dataset")
+    else:
+        log.info("opening files %s", m.files)
+        ds, url = open_files(m, needed)
+        link = False
     log.info("source has %d time steps, last %s", ds.sizes["time"], ds.time.values[-1])
     log.debug("dataset dims %s; variables %s", dict(ds.sizes), list(ds.data_vars))
     ref = m.reference_time
@@ -363,7 +404,7 @@ def convert(
         now = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         attrs = global_attrs(
             src_attrs, m, name=name, url=url, model_run=model_run, times=to_iso(times),
-            bounds=extent(spool.geo[m.lat].values, spool.geo[m.lon].values), now=now,
+            bounds=extent(spool.geo[m.lat].values, spool.geo[m.lon].values), now=now, link=link,
         )
         # the projection as a CF grid-mapping variable (a scalar placeholder: the information is in its attributes)
         proj = {gm: xr.Variable((), np.int32(0), gm_attrs)} if gm else {}
