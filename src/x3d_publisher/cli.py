@@ -100,9 +100,11 @@ def cmd_run(a) -> int:
     try:
         log.info("converting %s (%s h) -> %s", name, a.hours or m.hours, work)
         rc = convert(m, work, url=a.url, name=name, hours=a.hours, vars=a.vars, workers=a.workers,
-                     published=f"{pub.rstrip('/')}/{name}" if pub else None)
+                     published=f"{pub.rstrip('/')}/{name}" if pub else None, check=a.check)
         if rc == UP_TO_DATE:
             log.info("up to date, nothing to publish")
+            return UP_TO_DATE if a.check else 0
+        if a.check:
             return 0
         log.info("publishing to %s/%s", bucket_url, name)
         publish(work / name, f"{bucket_url}/{name}", endpoint_url=a.endpoint_url, keep=a.keep,
@@ -158,6 +160,7 @@ def parser() -> argparse.ArgumentParser:
     r.add_argument("--endpoint-url", default=env("S3_ENDPOINT_URL"))
     r.add_argument("--published-url", default=env("PUBLISHED_URL"), help="public base URL of the bucket, to skip up-to-date runs (default: <endpoint>/<bucket>)")
     r.add_argument("--force", action="store_true", default=bool(env("FORCE")), help="convert even if the published store is up to date ($FORCE)")
+    r.add_argument("--check", action="store_true", help="only check whether an update is needed: exit 0 if so, 3 if the published store is up to date, else an error; nothing is converted or published")
     r.add_argument("--keep", type=int, default=int(env("KEEP_RUNS", 3)), help="runs to keep (default 3, or $KEEP_RUNS)")
     r.add_argument("--configure-bucket", action=argparse.BooleanOptionalAction, default=env("CONFIGURE_BUCKET", "1") not in ("", "0"), help="set public-read policy and CORS on the bucket (default on, or $CONFIGURE_BUCKET=0 to skip)")
     r.add_argument("--work", default=env("WORK", tempfile.gettempdir() + "/x3d-publisher"), help="scratch parent directory ($WORK)")

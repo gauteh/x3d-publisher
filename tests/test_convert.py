@@ -84,6 +84,15 @@ def test_convert_skips_up_to_date(tmp_path, ww3, source):
     assert cv.convert(ww3, tmp_path / "again", url=source, published=published, hours=2) == 0
 
 
+def test_check_only_never_writes(tmp_path, ww3, source):
+    out = tmp_path / "store"
+    cv.convert(ww3, out, url=source, run="r1")
+    published = (out / "ww3_4km").as_uri()
+    assert cv.convert(ww3, tmp_path / "c", url=source, published=published, check=True) == cv.UP_TO_DATE
+    assert cv.convert(ww3, tmp_path / "c", url=source, published=published, hours=2, check=True) == 0
+    assert not (tmp_path / "c").exists()
+
+
 def test_x3d_reads_what_was_published(tmp_path, ww3, source):
     xr_x3d = pytest.importorskip("x3d")
     out = tmp_path / "store"

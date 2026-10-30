@@ -368,9 +368,10 @@ def open_files(m: Model, needed: list[str]) -> tuple[xr.Dataset, str]:
 def convert(
     m: Model, out, *, url: str | None = None, name: str | None = None, start: str | None = None,
     hours: int | None = None, run: str | None = None, vars: list[str] | None = None,
-    published: str | None = None, workers: int = 4,
+    published: str | None = None, workers: int = 4, check: bool = False,
 ) -> int:
-    """Download and write `<out>/<name>/<run>/`; returns 0, or UP_TO_DATE if `published` has the same time steps."""
+    """Download and write `<out>/<name>/<run>/`; returns 0, or UP_TO_DATE if `published` has the same time steps.
+    With `check` nothing is downloaded or written: only the source is opened and compared with `published`."""
     # shared login nodes cap threads per user: keep dask/zarr/asyncio pools small
     dask.config.set(scheduler="threads", num_workers=workers)
     zarr.config.set({"async.concurrency": workers, "threading.max_workers": workers})
@@ -409,6 +410,10 @@ def convert(
         log.info("published store already has these %d time steps (%s .. %s); nothing to do",
                  ds.sizes["time"], ds.time.values[0], ds.time.values[-1])
         return UP_TO_DATE
+    if check:
+        log.info("the published store is out of date: %d time steps (%s .. %s) to convert",
+                 ds.sizes["time"], ds.time.values[0], ds.time.values[-1])
+        return 0
     n, y, x = ds.sizes["time"], m.y_dim, m.x_dim
     log.info("downloading %d variables x %d time steps (%s .. %s), ~%.0f MB",
              len(needed), n, ds.time.values[0], ds.time.values[-1], ds.nbytes / 1e6)
