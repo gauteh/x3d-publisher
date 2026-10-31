@@ -254,3 +254,19 @@ def test_overview_can_be_packed_coarser_than_the_full_layouts(tmp_path):
     assert info["ov_scales"]["temperature"] == m.scales["temperature"]
     for layout, want in (("ov.zarr", 0.1), ("map.zarr", 0.01), ("ts.zarr", 0.01)):
         assert xr.open_zarr(run / layout, consolidated=True).Uwind_eastward.encoding["scale_factor"] == want
+
+
+def test_files_source_skips_runs_that_may_still_be_written(tmp_path):
+    m, ds = norkyst_source(tmp_path / "full.nc")
+    d = tmp_path / "files"
+    d.mkdir()
+    for run, parts in {"20251231T00Z": ("AN", "FC_0001"), "20260101T00Z": ("AN", "FC_0001"), "20260102T00Z": ("AN",)}.items():
+        for part in parts:
+            ds.isel(time=slice(0, 3)).to_netcdf(d / f"nk_his_zdepth_{run}_m00_{part}.nc")
+    m = dataclasses.replace(m, url=None, files=str(d / "nk_his_zdepth_*_m00_*.nc"), files_runs=3, files_per_run=2, files_min_age=0)
+    # the newest run has only its AN so far: it is skipped as a whole
+    assert cv.open_files(m, m.vars)[1].endswith("runs 20251231T00Z .. 20260101T00Z)")
+    # a complete run is skipped while a file of it is still being modified
+    m = dataclasses.replace(m, files_min_age=3600)
+    with pytest.raises(SystemExit, match="no complete model run"):
+        cv.open_files(m, m.vars)

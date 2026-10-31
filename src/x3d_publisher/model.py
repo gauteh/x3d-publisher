@@ -24,7 +24,10 @@ class Model:
     files_runs: int = 3
     # the model run (reference time) in a file name, as a regex with one group in the form %Y%m%dT%HZ
     files_run_regex: str = r"_(\d{8}T\d{2}Z)_"
-    # files modified more recently than this (seconds) may still be written and are skipped
+    # a run is only used when it is complete: it has `files_per_run` files (if set; the last piece is written last)
+    # and none of them was modified within the last `files_min_age` seconds (it may still be written).
+    # An incomplete run is skipped as a whole, so the store never contains a half-written run.
+    files_per_run: int | None = None
     files_min_age: float = 300
     y_dim: str = "rlat"
     x_dim: str = "rlon"

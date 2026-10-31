@@ -6,6 +6,8 @@
 name = "norkyst800"
 files = "/lustre/metproductionB/products/norkyst_v3/m00/norkyst800_his_zdepth_*_m00_*.nc"
 files_runs = 3  # covers back_hours = 48 with one run a day
+files_per_run = 6  # AN + FC_0001 .. FC_0005: a run with fewer files is still being written and is skipped
+files_min_age = 600  # seconds since the last modification of any file of the run
 # window: from this many hours before the newest model run to the end of the forecast
 back_hours = 48
 

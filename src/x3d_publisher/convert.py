@@ -334,18 +334,28 @@ def timed(label, fn, *args, **kw):
 def open_files(m: Model, needed: list[str]) -> tuple[xr.Dataset, str]:
     """The newest `m.files_runs` model runs of the files matching `m.files`, joined along time (like a THREDDS
     joinExisting aggregation). Where runs overlap the newest wins. Returns the dataset (lazy) and a source description.
-    Files younger than `m.files_min_age` seconds are skipped: they may still be written."""
+    A run that may still be written is skipped as a whole (see `Model.files_per_run`, `files_min_age`)."""
     found: dict[str, list[str]] = {}
     for f in sorted(glob.glob(m.files)):
         mt = re.search(m.files_run_regex, Path(f).name)
-        if not mt:
-            continue
-        if time.time() - Path(f).stat().st_mtime < m.files_min_age:
-            log.warning("skipping %s: modified in the last %.0f s", f, m.files_min_age)
-            continue
-        found.setdefault(mt.group(1), []).append(f)
+        if mt:
+            found.setdefault(mt.group(1), []).append(f)
     if not found:
         raise SystemExit(f"no files matching {m.files} (run id by {m.files_run_regex!r})")
+    now = time.time()
+    for r in sorted(found):
+        fs = found[r]
+        young = [f for f in fs if now - Path(f).stat().st_mtime < m.files_min_age]
+        if m.files_per_run and len(fs) != m.files_per_run:
+            why = f"{len(fs)} of {m.files_per_run} files"
+        elif young:
+            why = f"{Path(young[0]).name} was modified in the last {m.files_min_age:.0f} s"
+        else:
+            continue
+        log.warning("model run %s is not complete yet (%s): skipped", r, why)
+        del found[r]
+    if not found:
+        raise SystemExit(f"no complete model run among the files matching {m.files}")
     runs = sorted(found)[-m.files_runs:]
     files = [f for r in runs for f in sorted(found[r])]  # AN sorts before FC_0001, FC_0002, ...
     log.info("model runs %s: %d files", ", ".join(runs), len(files))
