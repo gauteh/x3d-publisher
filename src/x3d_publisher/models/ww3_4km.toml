@@ -23,7 +23,7 @@ map_chunk = 256            # inner chunk edge of map.zarr
 map_shard = [1, 1280, 768] # (time, y, x): the whole grid for one time step
 ts_chunk = 16              # inner chunk edge of ts.zarr (all time steps)
 ts_shard = 128
-ov_factor = 4              # overview = block means at 1/ov_factor resolution
+ov_factor = 8              # overview = block means at 1/ov_factor resolution (the ocean style only needs smooth fields)
 ov_tchunk = 1              # one time step per chunk: the viewer loads only the steps around the current one (7 variables of 24 steps are 16 MB)
 mesh_stride = 4            # decimation of grid.bin (viewer geometry)
 
@@ -40,3 +40,13 @@ tp = 0.01
 dir = 0.1
 uwnd = 0.01
 vwnd = 0.01
+
+# the overview is a quick look: coarser packing than the full-resolution layouts (map.zarr, ts.zarr keep `scales`)
+[ov_scales]
+hs = 0.05
+phs0 = 0.05
+phs1 = 0.05
+ptp0 = 0.1
+ptp1 = 0.1
+pdir0 = 1.0               # degrees
+pdir1 = 1.0

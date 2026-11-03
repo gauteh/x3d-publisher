@@ -7,7 +7,7 @@ def test_bundled_ww3():
     assert "ww3_4km" in models.bundled()
     m = models.load("ww3_4km")
     assert m.name == "ww3_4km" and m.url.startswith("https://thredds.met.no/")
-    assert m.map_shard == (1, 1280, 768) and m.ov_factor == 4
+    assert m.map_shard == (1, 1280, 768) and m.ov_factor == 8 and m.ov_tchunk == 1
     assert m.scales["hs"] == 0.01 and set(m.vars) <= set(m.scales) and set(m.ov_vars) <= set(m.scales)
 
 
