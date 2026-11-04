@@ -5,8 +5,11 @@
 # No credentials or bucket names belong here: where to publish is a deployment matter.
 name = "norkyst800"
 # One glob per production system (A, B) that writes the same files: a file is read from the first side where it is
-# complete and non-empty, from the next otherwise. TODO: add the storeA path once checked on ppi (see tests/test_lustre.py).
-files = ["/lustre/metproductionB/products/norkyst_v3/m00/norkyst800_his_zdepth_*_m00_*.nc"]
+# complete and non-empty, from the next otherwise. The A path mirrors B (unchecked: confirm on ppi with `pytest -m lustre`).
+files = [
+  "/lustre/metproductionB/products/norkyst_v3/m00/norkyst800_his_zdepth_*_m00_*.nc",
+  "/lustre/metproductionA/products/norkyst_v3/m00/norkyst800_his_zdepth_*_m00_*.nc",
+]
 files_runs = 3  # covers back_hours = 48 with one run a day
 files_per_run = 6  # AN + FC_0001 .. FC_0005: a run with fewer files is still being written and is skipped
 files_min_age = 600  # seconds since the last modification of any file of the run
