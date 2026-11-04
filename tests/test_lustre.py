@@ -13,18 +13,24 @@ from x3d_publisher import model as models
 pytestmark = pytest.mark.lustre
 
 
-SIDES = len(models.load("norkyst800_lustre").file_globs)
+PAIRS = [("norkyst800_lustre", "norkyst800"), ("ww3_4km_lustre", "ww3_4km")]
+CASES = [(lm, tm, i) for lm, tm in PAIRS for i in range(max(len(models.load(lm).file_globs), 2))]
 
 
-@pytest.fixture(scope="module", params=range(max(SIDES, 2)), ids=lambda i: f"side{i}")
+def back(tm):
+    return tm.back_hours or 24  # ww3 has no back_hours: its window is the last N steps, 24 h before the newest run
+
+
+@pytest.fixture(scope="module", params=CASES, ids=lambda c: f"{c[0]}-side{c[2]}")
 def sources(request):
     """Each configured production system (A, B) on its own is compared with THREDDS, not only the first one."""
     import dataclasses
 
-    lm, tm = models.load("norkyst800_lustre"), models.load("norkyst800")
-    if request.param >= SIDES:
+    lname, tname, side = request.param
+    lm, tm = models.load(lname), models.load(tname)
+    if side >= len(lm.file_globs):
         pytest.skip("only one lustre source configured in the model")
-    lm = dataclasses.replace(lm, files=[lm.file_globs[request.param]])
+    lm = dataclasses.replace(lm, files=[lm.file_globs[side]])
     if not glob.glob(lm.files[0]):
         pytest.skip(f"no files matching {lm.files[0]}")
     files, desc = cv.open_files(lm, tm.vars)
@@ -39,15 +45,15 @@ def sources(request):
     return tm, files.sel(tm.select), thredds.sel(tm.select)
 
 
-def common_window(tm, a, b, back_hours=72):
+def common_window(tm, a, b):
     ref = np.datetime64(cv.to_iso(np.atleast_1d(a[tm.reference_time].values))[0][:-1], "ns")
     t = np.intersect1d(a.time.values, b.time.values)
-    return t[t >= ref - np.timedelta64(back_hours, "h")]
+    return t[t >= ref - np.timedelta64(back(tm) + 24, "h")]
 
 
 def test_time_axis_is_the_same(sources):
     tm, files, thredds = sources
-    first = np.datetime64(cv.to_iso(np.atleast_1d(files[tm.reference_time].values))[0][:-1], "ns") - np.timedelta64(tm.back_hours, "h")
+    first = np.datetime64(cv.to_iso(np.atleast_1d(files[tm.reference_time].values))[0][:-1], "ns") - np.timedelta64(back(tm), "h")
     a, b = files.time.values, thredds.time.values
     np.testing.assert_array_equal(a[a >= first], b[b >= first])
 
@@ -55,7 +61,7 @@ def test_time_axis_is_the_same(sources):
 def test_point_series_over_days_match(sources):
     tm, files, thredds = sources
     t = common_window(tm, files, thredds)
-    assert len(t) >= 72, "the window must cover several files"
+    assert len(t) >= 48, "the window must cover several files"
     pt = {tm.y_dim: files.sizes[tm.y_dim] // 2, tm.x_dim: files.sizes[tm.x_dim] // 2}
     for v in tm.vars:
         a = files[v].sel(time=t).isel(pt).values
@@ -71,18 +77,19 @@ def test_fields_at_file_boundaries_match(sources):
     box = {tm.y_dim: slice(files.sizes[tm.y_dim] // 2, files.sizes[tm.y_dim] // 2 + 40),
            tm.x_dim: slice(files.sizes[tm.x_dim] // 2, files.sizes[tm.x_dim] // 2 + 40)}
     for s in steps:
-        for v in ("u_eastward", "temperature"):
+        for v in tm.vars[:2]:
             a = files[v].sel(time=s).isel(box).values
             b = thredds[v].sel(time=s).isel(box).values
             np.testing.assert_allclose(a, b, rtol=0, atol=1e-5, equal_nan=True, err_msg=f"{v} at {s}")
 
 
-def test_production_systems_agree():
+@pytest.mark.parametrize("name", [p[0] for p in PAIRS])
+def test_production_systems_agree(name):
     """Files that exist on more than one side (A, B: the globs of the model) must have identical content, and the
     union of the sides must cover every file of the newest run. Needs a model with two globs in `files`."""
     import os
 
-    lm = models.load("norkyst800_lustre")
+    lm = models.load(name)
     globs = lm.file_globs
     if len(globs) < 2:
         pytest.skip("only one lustre source configured in the model")

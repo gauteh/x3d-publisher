@@ -184,3 +184,15 @@ def test_empty_file_on_the_first_side_falls_back_to_the_second(tmp_path):
     (tmp_path / "A" / n[1]).write_bytes(b"")
     _, desc = cv.open_files(lustre_model(tmp_path, "A", "B"), ["x"])
     assert "3 files" in desc
+
+
+def test_ww3_lustre_names_and_runs(tmp_path):
+    import dataclasses
+
+    wm = models.load("ww3_4km_lustre")
+    runs = ("20260101T00Z", "20260101T06Z")
+    names = [f"{v}_ww3_4km_b{r}.nc" for r in runs for v in ("20260101T00Z", "20260101T06Z")]
+    nk_files(tmp_path, "A", names + ["ww3_20260101T06Z.nc"])  # the whole-run file is not a piece
+    m = dataclasses.replace(wm, files=[str(tmp_path / "A" / "*_ww3_4km_b*.nc")], files_runs=2, files_per_run=2, files_min_age=60)
+    _, desc = cv.open_files(m, ["x"])
+    assert "4 files, runs 20260101T00Z .. 20260101T06Z" in desc

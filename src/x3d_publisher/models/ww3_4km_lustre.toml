@@ -1,0 +1,70 @@
+# WW3 4 km (MET Norway) from the model's output files on lustre instead of THREDDS (same store as `ww3_4km`).
+# No credentials or bucket names belong here: where to publish is a deployment matter (see `x3d-publisher run --help`).
+name = "ww3_4km"
+# One glob per production system (A, B) that writes the same files (see norkyst800_lustre). The files
+# <valid start>_ww3_4km_b<run>.nc hold 6 hourly steps each; ww3_<run>.nc (the whole run) is not matched.
+files = [
+  "/lustre/metproductionB/products/WW3/WW3_4km/*_ww3_4km_b*.nc",
+  "/lustre/metproductionA/products/WW3/WW3_4km/*_ww3_4km_b*.nc",
+]
+files_run_regex = '_b(\d{8}T\d{2}Z)\.nc$'
+files_runs = 5            # a run every 6 h of 48 h each: the newest and the four before it cover the window
+files_per_run = 8         # 8 pieces of 6 h; a run with fewer files is still being written and is skipped
+files_min_age = 600       # seconds since the last modification of any file of the run
+hours = 72  # default window: the last N time steps (24 h before the newest run, then its forecast)
+
+# source names
+y_dim = "rlat"
+x_dim = "rlon"
+lat = "latitude"
+lon = "longitude"
+# time of the newest model run (set from the newest file's run id); optional
+reference_time = "forecast_reference_time"
+
+# phs0 = wind sea, phs1 = swell (spectral wave-age partitioning)
+vars = ["hs", "phs0", "phs1", "tp", "dir", "uwnd", "vwnd"]
+# period/direction of the partitions drive the animated waves; only needed at overview resolution
+ov_vars = ["hs", "phs0", "phs1", "ptp0", "ptp1", "pdir0", "pdir1"]
+
+[layout]
+zstd_level = 5
+map_chunk = 256            # inner chunk edge of map.zarr
+map_shard = [1, 1280, 768] # (time, y, x): the whole grid for one time step
+ts_chunk = 16              # inner chunk edge of ts.zarr (all time steps)
+ts_shard = 128
+ov_factor = 8              # overview = block means at 1/ov_factor resolution (the ocean style only needs smooth fields)
+ov_tchunk = 1              # one time step per chunk: the viewer loads only the steps around the current one (7 variables of 24 steps are 16 MB)
+mesh_stride = 4            # decimation of grid.bin (viewer geometry)
+
+# int16 packing: precision = scale_factor (about 3x smaller than float32)
+[scales]
+hs = 0.01
+phs0 = 0.01
+phs1 = 0.01
+ptp0 = 0.01
+ptp1 = 0.01
+pdir0 = 0.1
+pdir1 = 0.1
+tp = 0.01
+dir = 0.1
+uwnd = 0.01
+vwnd = 0.01
+
+# the overview is a quick look: coarser packing than the full-resolution layouts (map.zarr, ts.zarr keep `scales`)
+[ov_scales]
+hs = 0.05
+phs0 = 0.05
+phs1 = 0.05
+ptp0 = 0.1
+ptp1 = 0.1
+pdir0 = 1.0               # degrees
+pdir1 = 1.0
+
+# plausible values per variable (unpacked unit), checked before publishing; scale and fill are in [scales]
+[ranges]
+hs = [0, 30]
+phs0 = [0, 30]
+phs1 = [0, 30]
+tp = [0, 40]
+uwnd = [-80, 80]
+vwnd = [-80, 80]
