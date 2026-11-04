@@ -102,3 +102,45 @@ def test_production_systems_agree(name):
     for n in both[-12:]:
         a, b = [xr.open_dataset(s[n]) for s in sides if n in s][:2]
         xr.testing.assert_equal(a[lm.vars[:3]].isel(**{d: 0 for d in lm.select}), b[lm.vars[:3]].isel(**{d: 0 for d in lm.select}))
+
+
+@pytest.fixture(scope="module", params=PAIRS, ids=lambda p: p[0])
+def aggregates(request, tmp_path_factory):
+    """The converted stores (what is published) from the lustre files and from THREDDS: the default window of the model."""
+    import json
+
+    lname, tname = request.param
+    lm, tm = models.load(lname), models.load(tname)
+    if not any(glob.glob(g) for g in lm.file_globs):
+        pytest.skip(f"no files matching {lm.file_globs}")
+    out = tmp_path_factory.mktemp("agg")
+    vars = tm.vars[:2]
+    try:
+        cv.convert(tm, out / "thredds", run="t", vars=vars, workers=2)
+    except OSError as e:
+        pytest.skip(f"THREDDS unavailable: {e}")
+    cv.convert(lm, out / "lustre", run="t", vars=vars, workers=2)
+    runs = [json.loads((out / s / tm.name / "t" / "dataset.json").read_text()) for s in ("lustre", "thredds")]
+    if runs[0]["model_run"] != runs[1]["model_run"]:
+        pytest.skip("THREDDS is on another model run than the files")
+    return tm, vars, [out / s / tm.name / "t" for s in ("lustre", "thredds")], runs
+
+
+def test_aggregate_time_series_at_ocean_points_match(aggregates):
+    tm, vars, (lus, thr), (dl, dt_) = aggregates
+    common = sorted(set(dl["times"]) & set(dt_["times"]))
+    assert len(common) >= 48, f"the aggregates share only {len(common)} time steps"
+    il, it = [np.array([d["times"].index(t) for t in common]) for d in (dl, dt_)]
+    for v in vars:
+        a = xr.open_zarr(lus / "ts.zarr", consolidated=True)[v]
+        b = xr.open_zarr(thr / "ts.zarr", consolidated=True)[v]
+        scale = dl["scales"][v]
+        valid = np.asarray(a.isel(time=il).notnull().all("time"))  # ocean at every step
+        assert valid.sum() > 100, f"{v}: too few ocean points"
+        ys, xs = np.nonzero(valid)
+        pick = np.linspace(0, len(ys) - 1, 6).astype(int)  # spread over the domain
+        for k in pick:
+            y, x = int(ys[k]), int(xs[k])
+            sa = a.isel(time=il, **{a.dims[1]: y, a.dims[2]: x}).values
+            sb = b.isel(time=it, **{b.dims[1]: y, b.dims[2]: x}).values
+            np.testing.assert_allclose(sa, sb, rtol=0, atol=scale * 1.01, err_msg=f"{v} at y={y}, x={x}")
