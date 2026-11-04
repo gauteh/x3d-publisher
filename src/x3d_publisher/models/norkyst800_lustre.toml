@@ -5,7 +5,7 @@
 # No credentials or bucket names belong here: where to publish is a deployment matter.
 name = "norkyst800"
 # One glob per production system (A, B) that writes the same files: a file is read from the first side where it is
-# complete and non-empty, from the next otherwise. The A path mirrors B (unchecked: confirm on ppi with `pytest -m lustre`).
+# complete and non-empty, from the next otherwise. Both sides are verified against THREDDS by `pytest -m lustre`.
 files = [
   "/lustre/metproductionB/products/norkyst_v3/m00/norkyst800_his_zdepth_*_m00_*.nc",
   "/lustre/metproductionA/products/norkyst_v3/m00/norkyst800_his_zdepth_*_m00_*.nc",
