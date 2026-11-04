@@ -58,15 +58,29 @@ def test_time_axis_is_the_same(sources):
     np.testing.assert_array_equal(a[a >= first], b[b >= first])
 
 
+def ocean_points(tm, files, t, v, n=6):
+    """n points spread over the domain where `v` has data (not land, not ice-masked) at the first, middle and last step."""
+    mask = None
+    for s in (t[0], t[len(t) // 2], t[-1]):
+        m = np.asarray(files[v].sel(time=s).notnull())
+        mask = m if mask is None else mask & m
+    ys, xs = np.nonzero(mask)
+    assert len(ys) > 100, f"{v}: too few ocean points"
+    pick = np.linspace(0, len(ys) - 1, n).astype(int)
+    return [(int(ys[k]), int(xs[k])) for k in pick]
+
+
 def test_point_series_over_days_match(sources):
     tm, files, thredds = sources
     t = common_window(tm, files, thredds)
     assert len(t) >= 48, "the window must cover several files"
-    pt = {tm.y_dim: files.sizes[tm.y_dim] // 2, tm.x_dim: files.sizes[tm.x_dim] // 2}
     for v in tm.vars:
-        a = files[v].sel(time=t).isel(pt).values
-        b = thredds[v].sel(time=t).isel(pt).values
-        np.testing.assert_allclose(a, b, rtol=0, atol=1e-5, equal_nan=True, err_msg=v)
+        for y, x in ocean_points(tm, files, t, v):
+            pt = {tm.y_dim: y, tm.x_dim: x}
+            a = files[v].sel(time=t).isel(pt).values
+            b = thredds[v].sel(time=t).isel(pt).values
+            assert np.isfinite(a).sum() > len(t) // 2, f"{v} at {pt}: no data to compare"
+            np.testing.assert_allclose(a, b, rtol=0, atol=1e-5, equal_nan=True, err_msg=f"{v} at {pt}")
 
 
 def test_fields_at_file_boundaries_match(sources):
@@ -74,12 +88,13 @@ def test_fields_at_file_boundaries_match(sources):
     t = common_window(tm, files, thredds)
     # a few steps spread over the window, so that AN, several FC pieces and the previous run are all hit
     steps = t[np.unique(np.linspace(0, len(t) - 1, 8).astype(int))]
-    box = {tm.y_dim: slice(files.sizes[tm.y_dim] // 2, files.sizes[tm.y_dim] // 2 + 40),
-           tm.x_dim: slice(files.sizes[tm.x_dim] // 2, files.sizes[tm.x_dim] // 2 + 40)}
-    for s in steps:
-        for v in tm.vars[:2]:
+    for v in tm.vars[:2]:
+        y, x = ocean_points(tm, files, t, v, n=3)[1]  # a box around an ocean point
+        box = {tm.y_dim: slice(max(0, y - 20), y + 20), tm.x_dim: slice(max(0, x - 20), x + 20)}
+        for s in steps:
             a = files[v].sel(time=s).isel(box).values
             b = thredds[v].sel(time=s).isel(box).values
+            assert np.isfinite(a).mean() > 0.1, f"{v} at {s}: the box is mostly land"
             np.testing.assert_allclose(a, b, rtol=0, atol=1e-5, equal_nan=True, err_msg=f"{v} at {s}")
 
 
