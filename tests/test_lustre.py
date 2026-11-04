@@ -16,8 +16,8 @@ pytestmark = pytest.mark.lustre
 @pytest.fixture(scope="module")
 def sources():
     lm, tm = models.load("norkyst800_lustre"), models.load("norkyst800")
-    if not glob.glob(lm.files):
-        pytest.skip(f"no files matching {lm.files}")
+    if not any(glob.glob(g) for g in lm.file_globs):
+        pytest.skip(f"no files matching {lm.file_globs}")
     files, desc = cv.open_files(lm, tm.vars)
     try:
         thredds = xr.open_dataset(tm.url, decode_times=True)
