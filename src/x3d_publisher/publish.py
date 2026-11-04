@@ -48,6 +48,7 @@ def configure_bucket(s3, bucket: str) -> None:
 def publish(
     src, dest: str, *, endpoint_url: str | None = None, keep: int | None = None, grace_hours: float = 6,
     dry_run: bool = False, run: str | None = None, configure: bool = True, workers: int = 8, s3=None,
+    validate: bool = True, model=None,
 ) -> str:
     """Upload run `run` (default: the one in <src>/latest.json) of the local store `src` to `dest` (s3://bucket/prefix)."""
     import boto3
@@ -55,6 +56,11 @@ def publish(
     src = Path(src)
     run = run or json.loads((src / "latest.json").read_text())["run"]
     bucket, prefix = split(dest)
+    if validate:  # nothing is uploaded unless the run is good
+        from .validate import validate_store
+
+        for w in validate_store(src, run, model):
+            print(f"warning: {w}", flush=True)
     s3 = s3 or boto3.client("s3", endpoint_url=endpoint_url)
     if configure:
         try:
@@ -84,12 +90,35 @@ def publish(
     with ThreadPoolExecutor(workers) as ex:
         list(ex.map(put_counted, data))
         list(ex.map(put_counted, meta))
+    # latest.json only moves once everything it refers to is verified on S3
+    verify_remote(s3, bucket, prefix, src, run, files)
     s3.put_object(Bucket=bucket, Key=f"{prefix}/latest.json", Body=json.dumps({"run": run}).encode(),
                   CacheControl=LATEST, ContentType="application/json")
     print(f"published {len(files)} objects, latest -> {run}")
     if keep:
         prune(s3, bucket, prefix, run, keep, grace_hours, dry_run)
     return run
+
+
+def verify_remote(s3, bucket, prefix, src: Path, run: str, files: list[Path]):
+    """Every uploaded object is listed with the size of the local file, and the metadata read back is identical."""
+    remote = {}
+    for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=f"{prefix}/{run}/"):
+        remote.update({o["Key"]: o["Size"] for o in page.get("Contents", [])})
+    errs = []
+    for f in files:
+        k = f"{prefix}/{f.relative_to(src)}"
+        if k not in remote:
+            errs.append(f"missing on S3: {k}")
+        elif remote[k] != f.stat().st_size:
+            errs.append(f"size differs on S3: {k} ({remote[k]} != {f.stat().st_size})")
+    if not errs:
+        for f in files:
+            if f.name in ("dataset.json", "zarr.json") and f.parent.name in (run, "map.zarr", "ts.zarr", "ov.zarr"):
+                if s3.get_object(Bucket=bucket, Key=f"{prefix}/{f.relative_to(src)}")["Body"].read() != f.read_bytes():
+                    errs.append(f"content differs on S3: {prefix}/{f.relative_to(src)}")
+    if errs:
+        raise RuntimeError(f"upload of run {run} is incomplete, latest.json was NOT updated:\n  " + "\n  ".join(errs[:20]))
 
 
 def prune(s3, bucket, prefix, current, keep, grace_hours, dry):

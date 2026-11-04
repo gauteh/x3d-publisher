@@ -40,6 +40,23 @@ On every publish the bucket is made readable by everyone and read-only: the poli
 The public URL is `<endpoint>/<project-id>:<bucket>/<prefix>`, which is what x3d opens:
 `xr.open_dataset("x3d+https://rgw.met.no/<project-id>:norkyst800m-v3/norkyst800")`.
 
+## Safety checks
+
+`run` and `publish` check the run before uploading anything (`x3d-publish validate store/NAME [--model M]` does only
+that, exit code 1 on failure; `publish --no-validate` skips it). `validate.py` follows `x3d/docs/format.md` and what the
+web client parses: `dataset.json` fields, strictly increasing ISO times (and no gap above `max_gap_hours`),
+`grid.bin` size and coordinates, and for every array in `map.zarr`/`ts.zarr`/`ov.zarr` the shape, `int16`, fill value,
+`scale_factor` and (map/ts) sharding with the index at the start. The data itself is sampled: a time step that is
+(almost) all fill (source files missing) or values outside the `[ranges]` of the model fail the run, and so does a run
+with less than half the time steps of the published one. After the upload and before `latest.json` is written,
+every object is listed on S3 with the size of the local file and the metadata is read back; if anything is missing
+`publish` raises and `latest.json` stays on the previous run.
+
+`files` of a lustre model may be a list of globs, one per production system (A and B) that writes the same files.
+A file is read from the first side where it is non-empty and older than `files_min_age`, otherwise from the next; a run
+missing a file on all sides is skipped as incomplete. `pytest -m lustre` (on a node that mounts /lustre) also checks
+that files present on both sides are identical.
+
 ## Models
 
 A model is one TOML file in `src/x3d_publisher/models/` (or any path given instead of the name): source URL,

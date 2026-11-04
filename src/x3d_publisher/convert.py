@@ -335,29 +335,48 @@ def open_files(m: Model, needed: list[str]) -> tuple[xr.Dataset, str]:
     """The newest `m.files_runs` model runs of the files matching `m.files`, joined along time (like a THREDDS
     joinExisting aggregation). Where runs overlap the newest wins. Returns the dataset (lazy) and a source description.
     A run that may still be written is skipped as a whole (see `Model.files_per_run`, `files_min_age`)."""
-    found: dict[str, list[str]] = {}
-    for f in sorted(glob.glob(m.files)):
-        mt = re.search(m.files_run_regex, Path(f).name)
-        if mt:
-            found.setdefault(mt.group(1), []).append(f)
+    globs = m.file_globs
+    # run -> file name -> the copies of it (one per production system that has it), in the order of the globs
+    found: dict[str, dict[str, list[str]]] = {}
+    for g in globs:
+        for f in sorted(glob.glob(g)):
+            mt = re.search(m.files_run_regex, Path(f).name)
+            if mt:
+                found.setdefault(mt.group(1), {}).setdefault(Path(f).name, []).append(f)
     if not found:
-        raise SystemExit(f"no files matching {m.files} (run id by {m.files_run_regex!r})")
+        raise SystemExit(f"no files matching {', '.join(globs)} (run id by {m.files_run_regex!r})")
     now = time.time()
+
+    def usable(f):
+        try:
+            st = Path(f).stat()
+        except OSError:
+            return False
+        return st.st_size > 0 and now - st.st_mtime >= m.files_min_age
+
+    chosen: dict[str, list[str]] = {}
     for r in sorted(found):
-        fs = found[r]
-        young = [f for f in fs if now - Path(f).stat().st_mtime < m.files_min_age]
-        if m.files_per_run and len(fs) != m.files_per_run:
-            why = f"{len(fs)} of {m.files_per_run} files"
-        elif young:
-            why = f"{Path(young[0]).name} was modified in the last {m.files_min_age:.0f} s"
+        names = found[r]
+        why = None
+        if m.files_per_run and len(names) != m.files_per_run:
+            why = f"{len(names)} of {m.files_per_run} files"
         else:
-            continue
-        log.warning("model run %s is not complete yet (%s): skipped", r, why)
-        del found[r]
-    if not found:
-        raise SystemExit(f"no complete model run among the files matching {m.files}")
+            pick = {n: next((c for c in copies if usable(c)), None) for n, copies in names.items()}
+            bad = [n for n, c in pick.items() if c is None]
+            if bad:
+                why = f"{bad[0]} is empty or was modified in the last {m.files_min_age:.0f} s" + (" (on all copies)" if len(globs) > 1 else "")
+            else:
+                for n, c in pick.items():
+                    if c != names[n][0] and len(globs) > 1:
+                        log.warning("%s: using %s (the first copy %s is not usable)", n, c, names[n][0])
+                chosen[r] = [pick[n] for n in sorted(pick)]  # AN sorts before FC_0001, FC_0002, ...
+        if why:
+            log.warning("model run %s is not complete yet (%s): skipped", r, why)
+    if not chosen:
+        raise SystemExit(f"no complete model run among the files matching {', '.join(globs)}")
+    found = chosen
     runs = sorted(found)[-m.files_runs:]
-    files = [f for r in runs for f in sorted(found[r])]  # AN sorts before FC_0001, FC_0002, ...
+    files = [f for r in runs for f in found[r]]
     log.info("model runs %s: %d files", ", ".join(runs), len(files))
     newest = np.datetime64(dt.datetime.strptime(runs[-1], "%Y%m%dT%HZ"), "ns")
     # one chunk per time step and selected level (e.g. the surface): a chunk is never a whole 3-D field
@@ -372,7 +391,7 @@ def open_files(m: Model, needed: list[str]) -> tuple[xr.Dataset, str]:
     keep = np.append(t[order][1:] != t[order][:-1], True)
     ds = ds.isel(time=order[keep])
     ds[m.reference_time or "forecast_reference_time"] = ((), newest)
-    return ds, f"{Path(m.files).name} ({len(files)} files, runs {runs[0]} .. {runs[-1]})"
+    return ds, f"{Path(globs[0]).name} ({len(files)} files, runs {runs[0]} .. {runs[-1]})"
 
 
 def convert(
@@ -393,7 +412,7 @@ def convert(
         log.info("opening %s", url)
         ds = retry(lambda: xr.open_dataset(url, decode_times=True), "open dataset")
     else:
-        log.info("opening files %s", m.files)
+        log.info("opening files %s", ", ".join(m.file_globs))
         ds, url = open_files(m, needed)
         link = False
     log.info("source has %d time steps, last %s", ds.sizes["time"], ds.time.values[-1])

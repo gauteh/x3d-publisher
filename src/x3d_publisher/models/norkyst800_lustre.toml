@@ -4,7 +4,9 @@
 # the newest `files_runs` runs are used and where they overlap the newest wins.
 # No credentials or bucket names belong here: where to publish is a deployment matter.
 name = "norkyst800"
-files = "/lustre/metproductionB/products/norkyst_v3/m00/norkyst800_his_zdepth_*_m00_*.nc"
+# One glob per production system (A, B) that writes the same files: a file is read from the first side where it is
+# complete and non-empty, from the next otherwise. TODO: add the storeA path once checked on ppi (see tests/test_lustre.py).
+files = ["/lustre/metproductionB/products/norkyst_v3/m00/norkyst800_his_zdepth_*_m00_*.nc"]
 files_runs = 3  # covers back_hours = 48 with one run a day
 files_per_run = 6  # AN + FC_0001 .. FC_0005: a run with fewer files is still being written and is skipped
 files_min_age = 600  # seconds since the last modification of any file of the run
@@ -54,3 +56,11 @@ Vwind_northward = 0.1
 
 [attrs]
 title = "NorKyst-800 (Norkyst_v3-800m): ROMS ocean forecast, surface layer"
+
+# plausible values per variable (unpacked unit), checked before publishing
+[ranges]
+u_eastward = [-5, 5]
+v_northward = [-5, 5]
+temperature = [-5, 35]
+Uwind_eastward = [-80, 80]
+Vwind_northward = [-80, 80]

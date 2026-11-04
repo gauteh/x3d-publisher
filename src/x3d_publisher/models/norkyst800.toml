@@ -50,3 +50,11 @@ Vwind_northward = 0.1
 
 [attrs]
 title = "NorKyst-800 (Norkyst_v3-800m): ROMS ocean forecast, surface layer"
+
+# plausible values per variable (unpacked unit), checked before publishing
+[ranges]
+u_eastward = [-5, 5]
+v_northward = [-5, 5]
+temperature = [-5, 35]
+Uwind_eastward = [-80, 80]
+Vwind_northward = [-80, 80]

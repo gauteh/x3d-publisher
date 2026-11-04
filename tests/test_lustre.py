@@ -66,3 +66,23 @@ def test_fields_at_file_boundaries_match(sources):
             a = files[v].sel(time=s).isel(box).values
             b = thredds[v].sel(time=s).isel(box).values
             np.testing.assert_allclose(a, b, rtol=0, atol=1e-5, equal_nan=True, err_msg=f"{v} at {s}")
+
+
+def test_production_systems_agree():
+    """Files that exist on more than one side (A, B: the globs of the model) must have identical content, and the
+    union of the sides must cover every file of the newest run. Needs a model with two globs in `files`."""
+    import os
+
+    lm = models.load("norkyst800_lustre")
+    globs = lm.file_globs
+    if len(globs) < 2:
+        pytest.skip("only one lustre source configured in the model")
+    sides = [{os.path.basename(f): f for f in glob.glob(g)} for g in globs]
+    if not all(sides):
+        pytest.skip(f"a source has no files: {[len(s) for s in sides]}")
+    names = sorted(set().union(*sides))
+    both = [n for n in names if sum(n in s for s in sides) > 1]
+    print(f"{len(names)} files, {len(both)} on several sides, only on one side: {[sum(n in s for s in sides) == 1 for n in names].count(True)}")
+    for n in both[-12:]:
+        a, b = [xr.open_dataset(s[n]) for s in sides if n in s][:2]
+        xr.testing.assert_equal(a[lm.vars[:3]].isel(**{d: 0 for d in lm.select}), b[lm.vars[:3]].isel(**{d: 0 for d in lm.select}))

@@ -19,8 +19,10 @@ class Model:
     ov_scales: dict[str, float] = field(default_factory=dict)
     # the source: an OPeNDAP/zarr/netCDF URL, or `files` (a glob of netCDF files, e.g. on a shared file system) holding
     # the newest `files_runs` model runs, each split in files that are joined along time; later runs win where they overlap
+    # `files` may be a list of globs for redundant copies of the same output (the production systems A and B): a file
+    # (by its name) is taken from the first copy that has it complete, so a file missing on one side is read from the other
     url: str | None = None
-    files: str | None = None
+    files: str | list[str] | None = None
     files_runs: int = 3
     # the model run (reference time) in a file name, as a regex with one group in the form %Y%m%dT%HZ
     files_run_regex: str = r"_(\d{8}T\d{2}Z)_"
@@ -52,7 +54,16 @@ class Model:
     ov_factor: int = 4
     ov_tchunk: int = 24
     mesh_stride: int = 4
+    # validation before publishing (see validate.py): the plausible range [lo, hi] of each variable in its unpacked unit,
+    # the fraction of valid (non-fill) cells a variable must have at every time step, and the longest gap in the time axis
+    ranges: dict[str, tuple[float, float]] = field(default_factory=dict)
+    min_valid: float = 0.005
+    max_gap_hours: float | None = 1.5
     extra: dict = field(default_factory=dict)
+
+    @property
+    def file_globs(self) -> list[str]:
+        return [self.files] if isinstance(self.files, str) else list(self.files or [])
 
     @classmethod
     def from_dict(cls, d: dict) -> "Model":
@@ -60,8 +71,11 @@ class Model:
         layout = d.pop("layout", {})
         d["scales"] = d.pop("scales", {})
         d["ov_scales"] = d.pop("ov_scales", {})
+        d["ranges"] = {k: tuple(v) for k, v in d.pop("ranges", {}).items()}
         known = set(cls.__dataclass_fields__) - {"extra"}
         params = {k: v for k, v in {**d, **layout}.items() if k in known}
+        if isinstance(params.get("files"), list):
+            params["files"] = list(params["files"])
         if "drop_attrs" in params:
             params["drop_attrs"] = tuple(params["drop_attrs"])
         if "map_shard" in params:
@@ -72,6 +86,9 @@ class Model:
         missing = [v for v in dict.fromkeys(m.vars + m.ov_vars) if v not in m.scales]
         if missing:
             raise ValueError(f"model {m.name}: no scale for {missing}")
+        bad = [v for v, r in m.ranges.items() if v not in m.scales or len(r) != 2 or not r[0] < r[1]]
+        if bad:
+            raise ValueError(f"model {m.name}: bad `ranges` for {bad}: need a variable with a scale and [lo, hi]")
         stray = [v for v in m.ov_scales if v not in m.ov_vars]
         if stray:
             raise ValueError(f"model {m.name}: ov_scales for variables that are not in ov_vars: {stray}")

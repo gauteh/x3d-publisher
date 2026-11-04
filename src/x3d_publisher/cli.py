@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import shutil
@@ -50,7 +51,7 @@ def cmd_serve(a) -> int:
 def cmd_models(a) -> int:
     for n in models.bundled():
         m = models.load(n)
-        print(f"{n}: {m.url or m.files}")
+        print(f"{n}: {m.url or ' + '.join(m.file_globs)}")
     return 0
 
 
@@ -69,7 +70,22 @@ def cmd_publish(a) -> int:
     if a.keep is not None and a.keep < 1:
         raise SystemExit("--keep must be >= 1")
     publish(a.src, a.dest, endpoint_url=a.endpoint_url, keep=a.keep, grace_hours=a.grace_hours, dry_run=a.dry_run,
-            run=a.run, configure=a.configure_bucket, workers=a.workers)
+            run=a.run, configure=a.configure_bucket, workers=a.workers, validate=not a.no_validate,
+            model=models.load(a.model) if a.model else None)
+    return 0
+
+
+def cmd_validate(a) -> int:
+    from .validate import ValidationError, validate_store
+
+    try:
+        warns = validate_store(a.src, a.run, models.load(a.model) if a.model else None, deep=not a.shallow)
+    except ValidationError as e:
+        print(e, file=sys.stderr)
+        return 1
+    for w in warns:
+        print(f"warning: {w}")
+    print("ok")
     return 0
 
 
@@ -80,10 +96,25 @@ def cmd_fetch(a) -> int:
     return 0
 
 
+def published_info(pub: str | None, name: str) -> dict | None:
+    """dataset.json of the run that is published now (to catch a run that is much worse); None if unknown."""
+    if not pub:
+        return None
+    import urllib.request
+
+    base = f"{pub.rstrip('/')}/{name}"
+    try:
+        get = lambda u: json.load(urllib.request.urlopen(u, timeout=30))
+        return get(f"{base}/{get(base + '/latest.json')['run']}/dataset.json")
+    except Exception:
+        return None
+
+
 def cmd_run(a) -> int:
     """One cycle: convert -> publish -> prune, in a private scratch directory that is always removed."""
     from .convert import UP_TO_DATE, convert
     from .publish import publish
+    from .validate import validate_store
 
     log = logging.getLogger("x3d_publisher.run")
     if not a.bucket_url:
@@ -106,9 +137,11 @@ def cmd_run(a) -> int:
             return UP_TO_DATE if a.check else 0
         if a.check:
             return 0
+        log.info("validating %s", work / name)
+        validate_store(work / name, None, m, published_info(pub, name))
         log.info("publishing to %s/%s", bucket_url, name)
         publish(work / name, f"{bucket_url}/{name}", endpoint_url=a.endpoint_url, keep=a.keep,
-                configure=a.configure_bucket, workers=a.upload_workers)
+                configure=a.configure_bucket, workers=a.upload_workers, validate=False)
         log.info("done")
         return 0
     finally:
@@ -141,6 +174,15 @@ def parser() -> argparse.ArgumentParser:
     u.add_argument("--grace-hours", type=float, default=6, help="never prune runs younger than this")
     u.add_argument("--dry-run", action="store_true", help="only list what --keep would delete")
     u.add_argument("--run", help="run to publish (default: the one in latest.json)")
+    u.add_argument("--no-validate", action="store_true", help="do not check the run before uploading (not recommended)")
+    u.add_argument("--model", help="model (name or .toml) whose ranges the validation applies")
+
+    va = sub.add_parser("validate", help="check that a local store will work in the web client (exit 1 if not)")
+    va.add_argument("src", help="local store directory containing latest.json and run directories")
+    va.add_argument("--run")
+    va.add_argument("--model", help="model (name or .toml): expected variables, value ranges, time gaps")
+    va.add_argument("--shallow", action="store_true", help="metadata only, do not read the data")
+    va.set_defaults(fn=cmd_validate)
     u.add_argument("--configure-bucket", action=argparse.BooleanOptionalAction, default=True, help="set public-read policy and CORS (GET/HEAD, Range) on the bucket (default on)")
     u.add_argument("--workers", type=int, default=8)
     u.set_defaults(fn=cmd_publish)

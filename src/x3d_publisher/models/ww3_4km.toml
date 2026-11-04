@@ -50,3 +50,12 @@ ptp0 = 0.1
 ptp1 = 0.1
 pdir0 = 1.0               # degrees
 pdir1 = 1.0
+
+# plausible values per variable (unpacked unit), checked before publishing; scale and fill are in [scales]
+[ranges]
+hs = [0, 30]
+phs0 = [0, 30]
+phs1 = [0, 30]
+tp = [0, 40]
+uwnd = [-80, 80]
+vwnd = [-80, 80]
