@@ -13,11 +13,20 @@ from x3d_publisher import model as models
 pytestmark = pytest.mark.lustre
 
 
-@pytest.fixture(scope="module")
-def sources():
+SIDES = len(models.load("norkyst800_lustre").file_globs)
+
+
+@pytest.fixture(scope="module", params=range(max(SIDES, 2)), ids=lambda i: f"side{i}")
+def sources(request):
+    """Each configured production system (A, B) on its own is compared with THREDDS, not only the first one."""
+    import dataclasses
+
     lm, tm = models.load("norkyst800_lustre"), models.load("norkyst800")
-    if not any(glob.glob(g) for g in lm.file_globs):
-        pytest.skip(f"no files matching {lm.file_globs}")
+    if request.param >= SIDES:
+        pytest.skip("only one lustre source configured in the model")
+    lm = dataclasses.replace(lm, files=[lm.file_globs[request.param]])
+    if not glob.glob(lm.files[0]):
+        pytest.skip(f"no files matching {lm.files[0]}")
     files, desc = cv.open_files(lm, tm.vars)
     try:
         thredds = xr.open_dataset(tm.url, decode_times=True)
