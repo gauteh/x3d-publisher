@@ -72,6 +72,7 @@ class Model:
     # the newest windows are always uploaded again (late revisions); older ones only when their file changed
     tail_windows: int = 4
     cache_seconds: int = 60  # max-age of the (mutable) track objects
+    check_days: int = 1  # `run --check` only looks at the windows since 00:00 UTC this many days ago
     track_chunk: int = 16384  # samples per chunk object
     extra: dict = field(default_factory=dict)
 
@@ -104,8 +105,8 @@ class Model:
         if m.kind == "track":
             if not m.files or m.tail_windows < 1 or m.track_chunk < 1:
                 raise ValueError(f"model {m.name}: a track model needs `files`, tail_windows >= 1 and track_chunk >= 1")
-            if m.retention_days < 0:
-                raise ValueError(f"model {m.name}: retention_days must be non-negative")
+            if m.retention_days < 0 or m.check_days < 0:
+                raise ValueError(f"model {m.name}: retention_days and check_days must be non-negative")
             if m.lat not in m.scales or m.lon not in m.scales:
                 raise ValueError(f"model {m.name}: a track model needs scales for {m.lat} and {m.lon}")
         missing = [v for v in dict.fromkeys(m.vars + m.ov_vars) if v not in m.scales]

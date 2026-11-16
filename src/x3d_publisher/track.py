@@ -235,6 +235,21 @@ class TrackWriter:
         zarr.consolidate_metadata(str(self.path))
 
 
+def recent_unchanged(m: Model, now: dt.datetime, previous: dict | None) -> bool:
+    """Cheap check: the windows of the last `check_days` + 1 days (from 00:00 UTC) are the published ones. Older
+    windows are not looked at; late data only arrives for the newest windows, and `run` without `--check` compares
+    everything."""
+    if not previous or previous.get("kind") != "track" or not previous.get("windows"):
+        return False
+    lo = (now - dt.timedelta(days=m.check_days)).replace(hour=0, minute=0, second=0, microsecond=0)
+    recent = [(s, version_of(m, f[0])) for s, f in windows_available(m, lo, now).items()]
+    published = [(w["start"], w["version"]) for w in previous["windows"] if w["start"] >= stamp(lo)]
+    if recent != published:
+        return False
+    log.info("the windows since %s are published; nothing to do", lo)
+    return True
+
+
 def convert_track(m: Model, out, *, name: str | None = None, now: dt.datetime | None = None, previous: dict | None = None,
                   check: bool = False, force: bool = False) -> int:
     """Write `<out>/<name>/{latest.json,track/}` from the newest file of every window. `previous` is the published
@@ -242,6 +257,8 @@ def convert_track(m: Model, out, *, name: str | None = None, now: dt.datetime | 
     The windows are read and written one at a time: memory does not grow with the length of the series."""
     name = name or m.name
     now = now or dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+    if check and not force and recent_unchanged(m, now, previous):
+        return UP_TO_DATE
     lo = series_start(m, now, previous)
     available = windows_available(m, lo, now)
     log.info("%d windows from %s (%d files)", len(available), lo, sum(map(len, available.values())))

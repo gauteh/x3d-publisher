@@ -131,7 +131,21 @@ def test_unlimited_history_backfills_and_rejects_missing_published_windows(tmp_p
     assert track.convert_track(m, tmp_path / "out", now=now, previous=info, check=True) == UP_TO_DATE
     info["windows"].append({"start": "20260902T000000", "version": "v"})
     with pytest.raises(SystemExit, match="refusing to drop 1 previously published windows"):
-        track.convert_track(m, tmp_path / "out", now=now, previous=info, check=True)
+        track.convert_track(m, tmp_path / "out", now=now, previous=info)
+
+
+def test_check_only_looks_at_the_recent_windows(tmp_path, m):
+    m = dataclasses.replace(m, retention_days=0, check_days=1)
+    for k in (0, 8 * 40, 8 * 40 + 1):
+        window(tmp_path, k, 4, 30)
+    now = T0 + dt.timedelta(days=40, hours=5)
+    assert track.convert_track(m, tmp_path / "out", now=now) == 0
+    info = json.loads((tmp_path / "out/altimeter_s3a/track/dataset.json").read_text())
+    assert track.convert_track(m, tmp_path / "out", now=now, previous=info, check=True) == UP_TO_DATE
+    window(tmp_path, 0, 6, 30)  # an old window is re-issued: only a full run notices
+    assert track.convert_track(m, tmp_path / "out", now=now, previous=info, check=True) == UP_TO_DATE
+    window(tmp_path, 8 * 40 + 1, 6, 30)  # the newest window is re-issued
+    assert track.convert_track(m, tmp_path / "out", now=now, previous=info, check=True) == 0
 
 
 def test_unlimited_history_rejects_unreadable_windows(tmp_path, m):
