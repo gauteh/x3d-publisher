@@ -2,6 +2,7 @@
 import dataclasses
 import datetime as dt
 import json
+from pathlib import Path
 
 import boto3
 import numpy as np
@@ -117,6 +118,30 @@ def test_series_is_cut_at_the_start_only_after_retention_and_trim(m):
     prev["windows"][0]["start"] = "20260828T000000"
     assert track.series_start(m, NOW, prev) == dt.datetime(2026, 8, 28)  # still within retention + trim: kept
     assert track.series_start(m, NOW, None) == dt.datetime(2026, 8, 29)
+
+
+def test_unlimited_history_backfills_and_rejects_missing_published_windows(tmp_path, m):
+    m = dataclasses.replace(m, retention_days=0)
+    window(tmp_path, 0, 4, 30)
+    window(tmp_path, 8 * 40, 4, 30)
+    now = T0 + dt.timedelta(days=45)
+    assert track.convert_track(m, tmp_path / "out", now=now) == 0
+    info = json.loads((tmp_path / "out/altimeter_s3a/track/dataset.json").read_text())
+    assert [w["start"] for w in info["windows"]] == ["20260901T000000", "20261011T000000"]
+    assert track.convert_track(m, tmp_path / "out", now=now, previous=info, check=True) == UP_TO_DATE
+    info["windows"].append({"start": "20260902T000000", "version": "v"})
+    with pytest.raises(SystemExit, match="refusing to drop 1 previously published windows"):
+        track.convert_track(m, tmp_path / "out", now=now, previous=info, check=True)
+
+
+def test_unlimited_history_rejects_unreadable_windows(tmp_path, m):
+    m = dataclasses.replace(m, retention_days=0)
+    window(tmp_path, 0, 4, 30)
+    window(tmp_path, 1, 4, 30)
+    files = track.windows_available(m, None, NOW)
+    Path(files["20260901T030000"][0]).write_bytes(b"invalid netcdf")
+    with pytest.raises(SystemExit, match="refusing to omit 1 unreadable windows"):
+        track.convert_track(m, tmp_path / "out", now=NOW)
 
 
 def test_a_series_that_lost_most_samples_is_rejected(tmp_path, m):

@@ -242,26 +242,42 @@ def validate_track(path, model: Model | None = None, published: dict | None = No
         errs.append(f"the series has {n} samples, the published one {published['n']}: more than half lost")
     if errs:
         raise ValidationError(errs, warns)
-    if deep:
+    if deep:  # in slices of whole chunks, so that memory does not grow with the series
         g = zarr.open_group(str(path / "track.zarr"), mode="r")
-        t = g["time"][:]
-        if (np.diff(t) <= 0).any():
+        step = max(1, (1 << 20) // chunk) * chunk
+        rng = model.ranges if model else {}
+        lat_fill = np.iinfo("int32").min
+        prev_t, unordered = None, False
+        bounds = {v: [np.inf, -np.inf] for v in (lat, lon)}
+        missing = {lat: 0, lon: 0}
+        vmin, vmax, valid = {v: np.inf for v in info["vars"]}, {v: -np.inf for v in info["vars"]}, {v: 0 for v in info["vars"]}
+        for i in range(0, n, step):
+            t = g["time"][i:i + step]
+            unordered |= bool((np.diff(t) <= 0).any()) or (prev_t is not None and t[0] <= prev_t)
+            prev_t = t[-1]
+            for v in (lat, lon):
+                raw = g[v][i:i + step]
+                x = raw[raw != lat_fill] * info["scales"][v]
+                missing[v] += len(raw) - len(x)
+                if len(x):
+                    bounds[v] = [min(bounds[v][0], x.min()), max(bounds[v][1], x.max())]
+            for v in info["vars"]:
+                raw = g[v][i:i + step]
+                ok = raw != FILL
+                valid[v] += int(ok.sum())
+                if ok.any() and v in rng:
+                    x = raw[ok] * np.float32(info["scales"][v])
+                    vmin[v], vmax[v] = min(vmin[v], x.min()), max(vmax[v], x.max())
+        if unordered:
             errs.append("time is not strictly increasing")
         for v, (lo, hi) in {lat: (-90, 90), lon: (-180, 180)}.items():
-            raw = g[v][:]
-            x = raw[raw != np.iinfo("int32").min] * info["scales"][v]
-            if len(x) < n or x.min() < lo or x.max() > hi:
-                errs.append(f"{v}: {n - len(x)} missing or outside [{lo}, {hi}]")
-        rng = model.ranges if model else {}
+            if missing[v] or bounds[v][0] < lo or bounds[v][1] > hi:
+                errs.append(f"{v}: {missing[v]} missing or outside [{lo}, {hi}]")
         for v in info["vars"]:
-            raw = g[v][:]
-            ok = raw != FILL
-            if ok.mean() < (model.min_valid if model else 0.005):
-                errs.append(f"{v}: only {ok.mean():.1%} of the samples have a value")
-            if v in rng and ok.any():
-                x = raw[ok] * np.float32(info["scales"][v])
-                if x.min() < rng[v][0] or x.max() > rng[v][1]:
-                    errs.append(f"{v}: values {x.min():.3g} .. {x.max():.3g} outside the plausible range {list(rng[v])}")
+            if valid[v] / n < (model.min_valid if model else 0.005):
+                errs.append(f"{v}: only {valid[v] / n:.1%} of the samples have a value")
+            if v in rng and valid[v] and (vmin[v] < rng[v][0] or vmax[v] > rng[v][1]):
+                errs.append(f"{v}: values {vmin[v]:.3g} .. {vmax[v]:.3g} outside the plausible range {list(rng[v])}")
     if errs:
         raise ValidationError(errs, warns)
     return warns

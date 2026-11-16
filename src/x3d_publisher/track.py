@@ -11,8 +11,8 @@ The source is a file per 3 h window that is re-issued (as a new file with a late
 arrive, so a window is always taken from its newest file. A window only changes in the last few updates, so the series
 is "frozen" behind the newest `tail_windows` windows: an update uploads the chunks from the first sample of the first
 changed window or of the `tail_windows`-th newest window, whichever is earlier, and the metadata.
-The series is cut at the start only when it is older than `retention_days + trim_days` (all samples shift then, so every
-chunk is rewritten).
+With finite retention, the series is cut at the start only when it is older than `retention_days + trim_days` (all
+samples shift then, so every chunk is rewritten). A `retention_days` of 0 retains all available history.
 
 Unlike runs, the objects are overwritten in place: they are served with a short TTL (`max-age=cache_seconds`, 60 by default) and revalidated.
 A reader that fetches during an update can see the new tail with the old shape; it never sees a chunk that is
@@ -77,10 +77,17 @@ def iso(s: str) -> str:
     return dt.datetime.strptime(s, STAMP).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def candidates(m: Model, lo: dt.datetime, hi: dt.datetime) -> list[tuple[int, str]]:
+def candidates(m: Model, lo: dt.datetime | None, hi: dt.datetime) -> list[tuple[int, str]]:
     """(index of the glob, file) of the files in the month directories of [lo, hi]; a month directory holds the
     windows that start in it."""
     pats: dict[str, int] = {}
+    if lo is None:
+        for i, g in enumerate(m.file_globs):
+            pattern = g.replace("%Y", "[0-9][0-9][0-9][0-9]").replace("%m", "[0-9][0-9]")
+            if "%" in pattern:
+                raise ValueError("unlimited track retention supports only %Y and %m in file patterns")
+            pats.setdefault(pattern, i)
+        return [(i, f) for p, i in pats.items() for f in sorted(glob.glob(p))]
     cur = lo.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     while cur <= hi:
         for i, g in enumerate(m.file_globs):
@@ -89,7 +96,7 @@ def candidates(m: Model, lo: dt.datetime, hi: dt.datetime) -> list[tuple[int, st
     return [(i, f) for p, i in pats.items() for f in sorted(glob.glob(p))]
 
 
-def windows_available(m: Model, lo: dt.datetime, hi: dt.datetime) -> dict[str, list[str]]:
+def windows_available(m: Model, lo: dt.datetime | None, hi: dt.datetime) -> dict[str, list[str]]:
     """Window start stamp -> usable files, newest version (creation stamp) first. A file is usable when it is not empty
     and was not modified in the last `files_min_age` seconds. Where several globs (production systems) have the same
     file, the first is preferred."""
@@ -100,7 +107,7 @@ def windows_available(m: Model, lo: dt.datetime, hi: dt.datetime) -> dict[str, l
         if not mt:
             continue
         start, _, version = mt.groups()
-        if not stamp(lo) <= start <= stamp(hi):
+        if (lo is not None and start < stamp(lo)) or start > stamp(hi):
             continue
         try:
             st = Path(f).stat()
@@ -115,9 +122,11 @@ def version_of(m: Model, path: str) -> str:
     return re.search(m.files_window_regex, Path(path).name).group(3)
 
 
-def series_start(m: Model, now: dt.datetime, previous: dict | None) -> dt.datetime:
+def series_start(m: Model, now: dt.datetime, previous: dict | None) -> dt.datetime | None:
     """Where the series starts: at the first published window (so that nothing shifts) until that is older than
-    retention + trim, then `retention_days` back."""
+    retention + trim, then `retention_days` back. None (no lower bound) when retention_days is 0."""
+    if m.retention_days == 0:
+        return None
     lo = now - dt.timedelta(days=m.retention_days)
     if previous and previous.get("kind") == "track" and previous.get("windows"):
         first = dt.datetime.strptime(previous["windows"][0]["start"], STAMP)
@@ -149,55 +158,88 @@ def read_window(m: Model, files: list[str]):
     return None, None
 
 
-def build(m: Model, available: dict[str, list[str]]):
-    """Read the newest file of every window and join them. Returns (windows, arrays, source attrs, variable attrs)."""
-    windows, parts, last, src = [], [], -np.inf, None
-    offset = 0
+def read_windows(m: Model, available: dict[str, list[str]]):
+    """Yield (start, file, source dataset, samples) of the newest readable file of every window, one window in memory at
+    a time. The samples (float64 columns) are sorted and strictly increasing across windows (a window is disjoint from the
+    next; this only guards the contract)."""
+    last = -np.inf
     for start, files in available.items():
         f, ds = read_window(m, files)
         if ds is None:
             log.warning("window %s skipped: no readable file", start)
             continue
-        src = ds
         t = ds.time.values.astype("datetime64[s]").astype("int64")
-        # sorted and strictly increasing across windows (a window is disjoint from the next; this only guards the contract)
         order = np.argsort(t, kind="stable")
         keep = order[np.append(True, np.diff(t[order]) > 0) & (t[order] > last)]
         if len(keep) != len(t):
             log.warning("window %s: dropped %d of %d samples (duplicate or out of order times)", start, len(t) - len(keep), len(t))
-        windows.append({"start": start, "version": version_of(m, f), "n": int(len(keep)), "offset": offset})
-        offset += len(keep)
+        part = {"time": t[keep], **{v: ds[v].values.astype("float64")[keep] for v in (*m.vars, m.lat, m.lon)}}
+        part[m.lon] = (part[m.lon] + 180) % 360 - 180  # the source has 0..360; publish -180..180
         if len(keep):
             last = t[keep[-1]]
-            part = {"time": t[keep], **{v: ds[v].values.astype("float64")[keep] for v in (*m.vars, m.lat, m.lon)}}
-            part[m.lon] = (part[m.lon] + 180) % 360 - 180  # the source has 0..360; publish -180..180
-            parts.append(part)
-    if not parts:
-        raise SystemExit("no samples in the source files")
-    arrays = {k: np.concatenate([p[k] for p in parts]) for k in parts[0]}
-    return windows, arrays, dict(src.attrs), {v: var_attrs(src[v].attrs, None, ATTRS) for v in (*m.vars, m.lat, m.lon)}
+        yield start, f, ds, part
 
 
-def write_arrays(path: Path, arrays: dict, attrs: dict, vattrs: dict, m: Model) -> None:
-    if path.exists():
-        shutil.rmtree(path)
-    comp, c = ZstdCodec(level=m.zstd_level), (m.track_chunk,)
-    ds = xr.Dataset(
-        {k: ("time", a, vattrs.get(k, {})) for k, a in arrays.items() if k != "time"},
-        coords={"time": ("time", arrays["time"].astype("datetime64[s]").astype("datetime64[ns]"), {"standard_name": "time"})},
-        attrs=attrs,
-    )
-    enc = {"time": {"units": "seconds since 1970-01-01T00:00:00", "dtype": "int64", "chunks": c, "compressors": (comp,)}}
-    for v in (*m.vars, m.lat, m.lon):
-        fill, dtype = (FILL32, "int32") if v in (m.lat, m.lon) else (FILL16, "int16")
-        enc[v] = {"dtype": dtype, "scale_factor": m.scales[v], "_FillValue": fill, "fill_value": fill, "chunks": c, "compressors": (comp,)}
-    ds.to_zarr(path, mode="w", zarr_format=3, consolidated=True, encoding=enc)
+class TrackWriter:
+    """Writes the arrays of the store in batches of whole chunks as the windows come in, so that memory is bounded by one
+    batch (`BATCH_CHUNKS` chunks) however long the series is. Group and variable attributes are set at the end."""
+
+    BATCH_CHUNKS = 16
+
+    def __init__(self, path: Path, m: Model):
+        self.path, self.m, self.n, self.started = path, m, 0, False
+        self.buf: dict[str, list[np.ndarray]] = {}
+        self.buffered = 0
+        if path.exists():
+            shutil.rmtree(path)
+
+    def add(self, part: dict) -> None:
+        for k, v in part.items():
+            self.buf.setdefault(k, []).append(v)
+        self.buffered += len(part["time"])
+        if self.buffered >= self.BATCH_CHUNKS * self.m.track_chunk:
+            self.flush()
+
+    def flush(self, final: bool = False) -> None:
+        m = self.m
+        n = self.buffered if final else self.buffered // m.track_chunk * m.track_chunk
+        if n == 0:
+            return
+        cat = {k: np.concatenate(v) for k, v in self.buf.items()}
+        self.buf = {k: [v[n:]] for k, v in cat.items()}
+        self.buffered -= n
+        ds = xr.Dataset(
+            {k: ("time", v[:n]) for k, v in cat.items() if k != "time"},
+            coords={"time": ("time", cat["time"][:n].astype("datetime64[s]").astype("datetime64[ns]"), {"standard_name": "time"})},
+        )
+        if not self.started:
+            comp, c = ZstdCodec(level=m.zstd_level), (m.track_chunk,)
+            enc = {"time": {"units": "seconds since 1970-01-01T00:00:00", "dtype": "int64", "chunks": c, "compressors": (comp,)}}
+            for v in (*m.vars, m.lat, m.lon):
+                fill, dtype = (FILL32, "int32") if v in (m.lat, m.lon) else (FILL16, "int16")
+                enc[v] = {"dtype": dtype, "scale_factor": m.scales[v], "_FillValue": fill, "fill_value": fill, "chunks": c, "compressors": (comp,)}
+            ds.to_zarr(self.path, mode="w", zarr_format=3, consolidated=False, encoding=enc)
+            self.started = True
+        else:  # the encoding of the existing arrays is used
+            ds.to_zarr(self.path, mode="a", append_dim="time", zarr_format=3, consolidated=False)
+        self.n += n
+
+    def close(self, attrs: dict, vattrs: dict) -> None:
+        import zarr
+
+        self.flush(final=True)
+        g = zarr.open_group(str(self.path), mode="r+", zarr_format=3)
+        g.attrs.update(attrs)
+        for v, a in vattrs.items():
+            g[v].attrs.update(a)
+        zarr.consolidate_metadata(str(self.path))
 
 
 def convert_track(m: Model, out, *, name: str | None = None, now: dt.datetime | None = None, previous: dict | None = None,
                   check: bool = False, force: bool = False) -> int:
     """Write `<out>/<name>/{latest.json,track/}` from the newest file of every window. `previous` is the published
-    dataset.json (decides where the series starts and whether anything changed); returns UP_TO_DATE if nothing did."""
+    dataset.json (decides where the series starts and whether anything changed); returns UP_TO_DATE if nothing did.
+    The windows are read and written one at a time: memory does not grow with the length of the series."""
     name = name or m.name
     now = now or dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
     lo = series_start(m, now, previous)
@@ -205,6 +247,10 @@ def convert_track(m: Model, out, *, name: str | None = None, now: dt.datetime | 
     log.info("%d windows from %s (%d files)", len(available), lo, sum(map(len, available.values())))
     if not available:
         raise SystemExit(f"no usable files matching {', '.join(m.file_globs)} for {lo} .. {now}")
+    if m.retention_days == 0 and previous and previous.get("kind") == "track":
+        missing = [w["start"] for w in previous["windows"] if w["start"] not in available]
+        if missing:
+            raise SystemExit(f"refusing to drop {len(missing)} previously published windows; first missing: {missing[0]}")
     newest = {s: version_of(m, f[0]) for s, f in available.items()}
     if not force and previous and previous.get("kind") == "track" and [(w["start"], w["version"]) for w in previous["windows"]] == list(newest.items()):
         log.info("published store already has these %d windows; nothing to do", len(newest))
@@ -212,19 +258,45 @@ def convert_track(m: Model, out, *, name: str | None = None, now: dt.datetime | 
     if check:
         log.info("the published store is out of date: %d windows to convert", len(newest))
         return 0
-    windows, arrays, src_attrs, vattrs = build(m, available)
-    n = len(arrays["time"])
-    times = to_iso(arrays["time"].astype("datetime64[s]"))
-    lat, lon = arrays[m.lat] * 1.0, arrays[m.lon] * 1.0
-    bounds = extent(lat, lon)
-    stamp_now = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    url = f"{Path(m.file_globs[0]).name} ({len(windows)} windows)"
-    attrs = global_attrs(src_attrs, m, name=name, url=url, model_run=None, times=times, bounds=bounds, now=stamp_now, link=False)
-    attrs.update(featureType="trajectory")
+
     root = Path(out) / name
     path = root / RUN
     path.mkdir(parents=True, exist_ok=True)
-    write_arrays(path / ARRAYS, arrays, attrs, vattrs, m)
+    writer = TrackWriter(path / ARRAYS, m)
+    windows, offset, src, t0, t1 = [], 0, None, None, None
+    box = {"lat": [np.inf, -np.inf], "lon": [np.inf, -np.inf]}
+    for k, (start, f, ds, part) in enumerate(read_windows(m, available), 1):
+        n = len(part["time"])
+        windows.append({"start": start, "version": version_of(m, f), "n": n, "offset": offset})
+        offset += n
+        src = ds
+        if n:
+            t0 = part["time"][0] if t0 is None else t0
+            t1 = part["time"][-1]
+            for key, v in (("lat", m.lat), ("lon", m.lon)):
+                x = part[v][np.isfinite(part[v])]
+                if len(x):
+                    box[key] = [min(box[key][0], float(x.min())), max(box[key][1], float(x.max()))]
+            writer.add(part)
+        if k % 1000 == 0:
+            log.info("%d of %d windows, %d samples", k, len(available), offset)
+    if not offset:
+        raise SystemExit("no samples in the source files")
+    skipped = sorted(set(available) - {w["start"] for w in windows})
+    if skipped and m.retention_days == 0:
+        raise SystemExit(f"refusing to omit {len(skipped)} unreadable windows; first: {skipped[0]}")
+
+    n = offset
+    times = to_iso(np.array([t0, t1]).astype("datetime64[s]"))
+    bounds = {"geospatial_lat_min": box["lat"][0], "geospatial_lat_max": box["lat"][1],
+              "geospatial_lon_min": box["lon"][0], "geospatial_lon_max": box["lon"][1]}
+    stamp_now = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    url = f"{Path(m.file_globs[0]).name} ({len(windows)} windows)"
+    attrs = global_attrs({k: v for k, v in src.attrs.items()}, m, name=name, url=url, model_run=None, times=times, bounds=bounds, now=stamp_now, link=False)
+    attrs.update(featureType="trajectory")
+    vattrs = {v: var_attrs(src[v].attrs, None, ATTRS) for v in (*m.vars, m.lat, m.lon)}
+    writer.close(attrs, vattrs)
+    assert writer.n == n, (writer.n, n)
     (path / "dataset.json").write_text(json.dumps({
         "format_version": FORMAT_VERSION, "kind": "track", "name": name, "run": RUN, "n": n, "chunk": m.track_chunk,
         "dims": {"time": "time"}, "geo": [m.lat, m.lon], "vars": m.vars, "scales": m.scales,

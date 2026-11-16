@@ -8,8 +8,7 @@ kind = "track"
 files = ["/lustre/storeB/project/fou/om/altimeter/s3a/%Y/%m/global_vavh_l3_rt_s3a_*.nc"]
 files_min_age = 300  # seconds since the last modification
 
-retention_days = 30
-trim_days = 7        # the series is cut at the start only when it is older than retention_days + trim_days
+retention_days = 0   # retain all available history
 tail_windows = 4     # the newest windows are uploaded again at every update; older chunks only when their file was replaced
 
 lat = "latitude"

@@ -65,7 +65,7 @@ class Model:
     # stamps in `files_window_regex`: window start, window end, creation) is used.
     kind: str = "grid"
     files_window_regex: str = r"_(\d{8}T\d{6})_(\d{8}T\d{6})_(\d{8}T\d{6})\.nc$"
-    retention_days: float = 30
+    retention_days: float = 30  # 0 retains all available history
     # the series starts at the first published window until it is older than retention_days + trim_days; dropping the
     # head shifts every sample, so it is done in one go (all chunks rewritten) instead of at every window
     trim_days: float = 7
@@ -104,6 +104,8 @@ class Model:
         if m.kind == "track":
             if not m.files or m.tail_windows < 1 or m.track_chunk < 1:
                 raise ValueError(f"model {m.name}: a track model needs `files`, tail_windows >= 1 and track_chunk >= 1")
+            if m.retention_days < 0:
+                raise ValueError(f"model {m.name}: retention_days must be non-negative")
             if m.lat not in m.scales or m.lon not in m.scales:
                 raise ValueError(f"model {m.name}: a track model needs scales for {m.lat} and {m.lon}")
         missing = [v for v in dict.fromkeys(m.vars + m.ov_vars) if v not in m.scales]
