@@ -74,6 +74,7 @@ class Model:
     cache_seconds: int = 60  # max-age of the (mutable) track objects
     check_days: int = 1  # `run --check` only looks at the windows since 00:00 UTC this many days ago
     track_chunk: int = 16384  # samples per chunk object
+    track_time_chunk: int = 524288  # the same for `time`, which readers fetch in full when they open the store (a multiple of track_chunk)
     extra: dict = field(default_factory=dict)
 
     @property
@@ -105,6 +106,8 @@ class Model:
         if m.kind == "track":
             if not m.files or m.tail_windows < 1 or m.track_chunk < 1:
                 raise ValueError(f"model {m.name}: a track model needs `files`, tail_windows >= 1 and track_chunk >= 1")
+            if m.track_time_chunk < m.track_chunk or m.track_time_chunk % m.track_chunk:
+                raise ValueError(f"model {m.name}: track_time_chunk must be a multiple of track_chunk")
             if m.retention_days < 0 or m.check_days < 0:
                 raise ValueError(f"model {m.name}: retention_days and check_days must be non-negative")
             if m.lat not in m.scales or m.lon not in m.scales:

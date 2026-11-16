@@ -1,7 +1,8 @@
 """Track datasets: along-track time series (satellite altimeter) as one growing 1-D time series.
 
 There is no grid, so none of the map/ts/ov layouts. The store is one Zarr v3 group of 1-D arrays along `time`, cut
-into chunks of `track_chunk` samples (one object each, plain `bytes` + `zstd`, no sharding):
+into chunks of `track_chunk` samples (one object each, plain `bytes` + `zstd`, no sharding), except `time` that has
+the larger `track_time_chunk` (readers need all of it to open the store, and it is small):
 
   <store>/latest.json                    {"run": "track", "kind": "track"}
   <store>/track/dataset.json             windows (start, file version, samples, offset), time span, scales, attributes
@@ -184,8 +185,6 @@ class TrackWriter:
     """Writes the arrays of the store in batches of whole chunks as the windows come in, so that memory is bounded by one
     batch (`BATCH_CHUNKS` chunks) however long the series is. Group and variable attributes are set at the end."""
 
-    BATCH_CHUNKS = 16
-
     def __init__(self, path: Path, m: Model):
         self.path, self.m, self.n, self.started = path, m, 0, False
         self.buf: dict[str, list[np.ndarray]] = {}
@@ -197,12 +196,12 @@ class TrackWriter:
         for k, v in part.items():
             self.buf.setdefault(k, []).append(v)
         self.buffered += len(part["time"])
-        if self.buffered >= self.BATCH_CHUNKS * self.m.track_chunk:
+        if self.buffered >= self.m.track_time_chunk:
             self.flush()
 
     def flush(self, final: bool = False) -> None:
         m = self.m
-        n = self.buffered if final else self.buffered // m.track_chunk * m.track_chunk
+        n = self.buffered if final else self.buffered // m.track_time_chunk * m.track_time_chunk
         if n == 0:
             return
         cat = {k: np.concatenate(v) for k, v in self.buf.items()}
@@ -214,7 +213,7 @@ class TrackWriter:
         )
         if not self.started:
             comp, c = ZstdCodec(level=m.zstd_level), (m.track_chunk,)
-            enc = {"time": {"units": "seconds since 1970-01-01T00:00:00", "dtype": "int64", "chunks": c, "compressors": (comp,)}}
+            enc = {"time": {"units": "seconds since 1970-01-01T00:00:00", "dtype": "int64", "chunks": (m.track_time_chunk,), "compressors": (comp,)}}
             for v in (*m.vars, m.lat, m.lon):
                 fill, dtype = (FILL32, "int32") if v in (m.lat, m.lon) else (FILL16, "int16")
                 enc[v] = {"dtype": dtype, "scale_factor": m.scales[v], "_FillValue": fill, "fill_value": fill, "chunks": c, "compressors": (comp,)}
@@ -315,7 +314,7 @@ def convert_track(m: Model, out, *, name: str | None = None, now: dt.datetime | 
     writer.close(attrs, vattrs)
     assert writer.n == n, (writer.n, n)
     (path / "dataset.json").write_text(json.dumps({
-        "format_version": FORMAT_VERSION, "kind": "track", "name": name, "run": RUN, "n": n, "chunk": m.track_chunk,
+        "format_version": FORMAT_VERSION, "kind": "track", "name": name, "run": RUN, "n": n, "chunk": m.track_chunk, "time_chunk": m.track_time_chunk,
         "dims": {"time": "time"}, "geo": [m.lat, m.lon], "vars": m.vars, "scales": m.scales,
         "tmin": times[0], "tmax": times[-1],
         "bbox": [bounds["geospatial_lon_min"], bounds["geospatial_lat_min"], bounds["geospatial_lon_max"], bounds["geospatial_lat_max"]],
@@ -360,17 +359,28 @@ def chunk_index(key: str) -> int | None:
     return int(mt.group(1)) if mt else None
 
 
+def chunk_size(info: dict, key: str) -> int:
+    """Samples per chunk of the array that the chunk object `key` (.../<array>/c/<i>) belongs to."""
+    return info["time_chunk"] if key.rsplit("/", 3)[1] == "time" else info["chunk"]
+
+
+def is_before(info: dict, key: str, first: int) -> bool:
+    """The chunk object ends before sample `first` (so it is not rewritten by an update from there)."""
+    return (chunk_index(key) or 0) < first // chunk_size(info, key)
+
+
 def plan_upload(previous: dict | None, info: dict, tail_windows: int, remote_chunks: set[str], local_chunks: set[str]) -> int:
-    """First chunk index to upload (0 = everything): the chunk of the first sample of the first changed window, or of
-    the `tail_windows`-th newest window, whichever is first. Everything is uploaded if what is published does not match
-    (other chunking, variables or scales; a chunk before that point is missing or should not exist)."""
+    """First sample to upload (0 = everything): the first sample of the first changed window or of the `tail_windows`-th
+    newest window, whichever is first; chunk objects that end before it are kept. Everything is uploaded if what is
+    published does not match (other chunking, variables or scales; a chunk before that point is missing or should not exist)."""
     ws = info["windows"]
-    if not previous or previous.get("kind") != "track" or any(previous.get(k) != info[k] for k in ("chunk", "vars", "scales")):
+    keys = ("chunk", "time_chunk", "vars", "scales")
+    if not previous or previous.get("kind") != "track" or any(previous.get(k) != info[k] for k in keys):
         return 0
     boundary = min(first_changed(previous["windows"], ws), max(0, len(ws) - tail_windows))
-    c0 = (ws[boundary]["offset"] if boundary < len(ws) else info["n"]) // info["chunk"]
-    before = lambda keys: {k for k in keys if (chunk_index(k) or 0) < c0}
-    return c0 if before(remote_chunks) == before(local_chunks) else 0
+    first = ws[boundary]["offset"] if boundary < len(ws) else info["n"]
+    before = lambda keys: {k for k in keys if is_before(info, k, first)}
+    return first if before(remote_chunks) == before(local_chunks) else 0
 
 
 def publish_track(src, dest: str, *, endpoint_url: str | None = None, configure: bool = True, workers: int = 8, s3=None,
@@ -406,9 +416,9 @@ def publish_track(src, dest: str, *, endpoint_url: str | None = None, configure:
         remote.update({o["Key"]: o["Size"] for o in page.get("Contents", [])})
     rel = lambda k: k[len(prefix) + 1:]
     tail = tail_windows or (model.tail_windows if model else 4)
-    c0 = plan_upload(previous, info, tail, {rel(k) for k in remote if chunk_index(k) is not None}, set(chunks))
-    todo = [k for k in chunks if (chunk_index(k) or 0) >= c0]
-    log.info("uploading %d of %d chunks (from chunk %d) of %d windows", len(todo), len(chunks), c0, len(info["windows"]))
+    first = plan_upload(previous, info, tail, {rel(k) for k in remote if chunk_index(k) is not None}, set(chunks))
+    todo = [k for k in chunks if not is_before(info, k, first)]
+    log.info("uploading %d of %d chunks (from sample %d) of %d windows", len(todo), len(chunks), first, len(info["windows"]))
 
     def put(key: str, f: Path, ctype="application/octet-stream"):
         s3.upload_file(str(f), bucket, f"{prefix}/{key}", ExtraArgs={"CacheControl": cache_control(model), "ContentType": ctype})

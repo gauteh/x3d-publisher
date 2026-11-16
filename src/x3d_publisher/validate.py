@@ -218,6 +218,7 @@ def validate_track(path, model: Model | None = None, published: dict | None = No
     if info is None or meta is None:
         raise ValidationError(errs)
     n, chunk = info.get("n"), info.get("chunk")
+    tchunk = info.get("time_chunk", chunk)
     ws = info.get("windows", [])
     if info.get("kind") != "track" or not isinstance(n, int) or n < 1 or not isinstance(chunk, int) or chunk < 1:
         errs.append("dataset.json: kind, n and chunk are required")
@@ -233,8 +234,9 @@ def validate_track(path, model: Model | None = None, published: dict | None = No
         if a is None:
             errs.append(f"track.zarr: array {name} is missing")
             continue
-        if a["shape"] != [n] or a.get("data_type") != dtype or a["chunk_grid"]["configuration"]["chunk_shape"] != [chunk]:
-            errs.append(f"track.zarr/{name}: expected shape [{n}], {dtype}, chunk [{chunk}]; got {a['shape']}, {a.get('data_type')}, {a['chunk_grid']['configuration']['chunk_shape']}")
+        want = tchunk if name == "time" else chunk
+        if a["shape"] != [n] or a.get("data_type") != dtype or a["chunk_grid"]["configuration"]["chunk_shape"] != [want]:
+            errs.append(f"track.zarr/{name}: expected shape [{n}], {dtype}, chunk [{want}]; got {a['shape']}, {a.get('data_type')}, {a['chunk_grid']['configuration']['chunk_shape']}")
         if name != "time" and (a.get("attributes", {}).get("scale_factor") != info["scales"].get(name) or "_FillValue" not in a.get("attributes", {})):
             errs.append(f"track.zarr/{name}: scale_factor/_FillValue do not match dataset.json")
     if published and published.get("kind") == "track" and published["windows"] and ws and published["windows"][0]["start"] == ws[0]["start"] \
@@ -244,7 +246,7 @@ def validate_track(path, model: Model | None = None, published: dict | None = No
         raise ValidationError(errs, warns)
     if deep:  # in slices of whole chunks, so that memory does not grow with the series
         g = zarr.open_group(str(path / "track.zarr"), mode="r")
-        step = max(1, (1 << 20) // chunk) * chunk
+        step = max(1, (1 << 20) // tchunk) * tchunk
         rng = model.ranges if model else {}
         lat_fill = np.iinfo("int32").min
         prev_t, unordered = None, False

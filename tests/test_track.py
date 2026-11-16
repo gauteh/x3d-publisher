@@ -23,7 +23,7 @@ NW = 8  # windows in the first round
 @pytest.fixture
 def m(tmp_path):
     base = models.load("altimeter_s3a")
-    return dataclasses.replace(base, files=[str(tmp_path / "src/%Y/%m/s3a_*.nc")], files_min_age=0, track_chunk=64,
+    return dataclasses.replace(base, files=[str(tmp_path / "src/%Y/%m/s3a_*.nc")], files_min_age=0, track_chunk=64, track_time_chunk=256,
                                tail_windows=2, retention_days=5, trim_days=1)
 
 
@@ -78,6 +78,7 @@ def test_incremental_publish_rewrites_only_the_tail(tmp_path, m, s3):
     assert track.run_cycle(m, **kw) == 0
     first = etags(s3)
     chunks = [k for k in first if "/VAVH/c/" in k]
+    assert len([k for k in first if "/time/c/" in k]) == -(-NW * 60 // 256)  # `time` has its own, larger chunk
     assert len(chunks) == -(-NW * 60 // 64) and json.loads(s3.get_object(Bucket="bkt", Key="alt/latest.json")["Body"].read())["kind"] == "track"
     assert track.run_cycle(m, check=True, **kw) == UP_TO_DATE
     assert track.run_cycle(m, **kw) == 0 and etags(s3) == first  # nothing to publish
@@ -110,6 +111,9 @@ def test_x3d_reads_the_track_store(tmp_path, m):
     assert np.isnan(ds.WIND_SPEED.values[0]) and (ds.WIND_SPEED.values[1:100] == 5).all()
     np.testing.assert_allclose(ds.latitude.values[:100], np.linspace(-80, 80, 100), atol=1e-6)
     assert (np.diff(ds.time.values.astype("int64")) > 0).all()
+    raw = xr.open_dataset(f"x3d+file://{tmp_path / 'out/altimeter_s3a'}", decode_times=False)
+    assert raw.time.dtype == "int64" and raw.time.attrs["units"] == "seconds since 1970-01-01"
+    np.testing.assert_array_equal(raw.time.values * 10**9, ds.time.values.astype("int64"))
 
 
 def test_series_is_cut_at_the_start_only_after_retention_and_trim(m):

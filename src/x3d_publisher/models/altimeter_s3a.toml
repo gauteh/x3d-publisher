@@ -23,6 +23,7 @@ title = "Sentinel-3A along-track significant wave height and wind speed (NRT)"
 [layout]
 zstd_level = 5
 track_chunk = 16384  # samples per chunk object (about 2 windows)
+track_time_chunk = 524288  # `time` is read in full on open: 146 objects rather than 4660
 
 # int16 packing (the source has 0.001 for the heights); latitude/longitude are int32 (the source's 1e-6 degrees)
 [scales]
