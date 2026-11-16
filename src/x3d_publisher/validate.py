@@ -195,6 +195,73 @@ def validate_store(store, run: str | None = None, model: Model | None = None, pu
     if latest is None:
         raise ValidationError(errs)
     run = run or latest.get("run")
+    if latest.get("kind") == "track":
+        if not (store / run).is_dir():
+            raise ValidationError([f"latest.json points to {run!r}, which is not a directory in the store"])
+        return validate_track(store / run, model, published, deep)
     if not run or not (store / run).is_dir():
         raise ValidationError([f"latest.json points to run {run!r}, which is not a directory in the store"])
     return validate_run(store / run, model, published, deep)
+
+
+def validate_track(path, model: Model | None = None, published: dict | None = None, deep: bool = True) -> list[str]:
+    """A track store (<store>/track): dataset.json against the arrays, then the data (strictly increasing time, coordinates,
+    value ranges, not mostly fill). `published` is the dataset.json now on S3: a series that lost most of its samples
+    without being cut at the start fails."""
+    import zarr
+
+    path = Path(path)
+    errs: list[str] = []
+    warns: list[str] = []
+    info = _json(path / "dataset.json", errs)
+    meta = _json(path / "track.zarr" / "zarr.json", errs)
+    if info is None or meta is None:
+        raise ValidationError(errs)
+    n, chunk = info.get("n"), info.get("chunk")
+    ws = info.get("windows", [])
+    if info.get("kind") != "track" or not isinstance(n, int) or n < 1 or not isinstance(chunk, int) or chunk < 1:
+        errs.append("dataset.json: kind, n and chunk are required")
+    if not ws or any(w["offset"] != sum(x["n"] for x in ws[:i]) for i, w in enumerate(ws)) or sum(w["n"] for w in ws) != n:
+        errs.append("dataset.json: windows are empty or their offsets/samples do not add up to n")
+    if [w["start"] for w in ws] != sorted({w["start"] for w in ws}):
+        errs.append("dataset.json: windows are not strictly increasing")
+    nodes = meta.get("consolidated_metadata", {}).get("metadata", {})
+    lat, lon = info.get("geo", ["latitude", "longitude"])
+    expect = {"time": "int64", lat: "int32", lon: "int32", **{v: "int16" for v in info.get("vars", [])}}
+    for name, dtype in expect.items():
+        a = nodes.get(name)
+        if a is None:
+            errs.append(f"track.zarr: array {name} is missing")
+            continue
+        if a["shape"] != [n] or a.get("data_type") != dtype or a["chunk_grid"]["configuration"]["chunk_shape"] != [chunk]:
+            errs.append(f"track.zarr/{name}: expected shape [{n}], {dtype}, chunk [{chunk}]; got {a['shape']}, {a.get('data_type')}, {a['chunk_grid']['configuration']['chunk_shape']}")
+        if name != "time" and (a.get("attributes", {}).get("scale_factor") != info["scales"].get(name) or "_FillValue" not in a.get("attributes", {})):
+            errs.append(f"track.zarr/{name}: scale_factor/_FillValue do not match dataset.json")
+    if published and published.get("kind") == "track" and published["windows"] and ws and published["windows"][0]["start"] == ws[0]["start"] \
+            and n < published["n"] // 2:
+        errs.append(f"the series has {n} samples, the published one {published['n']}: more than half lost")
+    if errs:
+        raise ValidationError(errs, warns)
+    if deep:
+        g = zarr.open_group(str(path / "track.zarr"), mode="r")
+        t = g["time"][:]
+        if (np.diff(t) <= 0).any():
+            errs.append("time is not strictly increasing")
+        for v, (lo, hi) in {lat: (-90, 90), lon: (-180, 180)}.items():
+            raw = g[v][:]
+            x = raw[raw != np.iinfo("int32").min] * info["scales"][v]
+            if len(x) < n or x.min() < lo or x.max() > hi:
+                errs.append(f"{v}: {n - len(x)} missing or outside [{lo}, {hi}]")
+        rng = model.ranges if model else {}
+        for v in info["vars"]:
+            raw = g[v][:]
+            ok = raw != FILL
+            if ok.mean() < (model.min_valid if model else 0.005):
+                errs.append(f"{v}: only {ok.mean():.1%} of the samples have a value")
+            if v in rng and ok.any():
+                x = raw[ok] * np.float32(info["scales"][v])
+                if x.min() < rng[v][0] or x.max() > rng[v][1]:
+                    errs.append(f"{v}: values {x.min():.3g} .. {x.max():.3g} outside the plausible range {list(rng[v])}")
+    if errs:
+        raise ValidationError(errs, warns)
+    return warns

@@ -59,6 +59,20 @@ class Model:
     ranges: dict[str, tuple[float, float]] = field(default_factory=dict)
     min_valid: float = 0.005
     max_gap_hours: float | None = 1.5
+    # track datasets (kind = "track", see track.py): along-track time series (satellite altimeter) kept as one growing
+    # 1-D time series. `files` are strftime patterns (%Y/%m: the directory of the window start); each file holds one
+    # window and a window is re-issued as late data arrives, so the newest file of a window (the last of the three
+    # stamps in `files_window_regex`: window start, window end, creation) is used.
+    kind: str = "grid"
+    files_window_regex: str = r"_(\d{8}T\d{6})_(\d{8}T\d{6})_(\d{8}T\d{6})\.nc$"
+    retention_days: float = 30
+    # the series starts at the first published window until it is older than retention_days + trim_days; dropping the
+    # head shifts every sample, so it is done in one go (all chunks rewritten) instead of at every window
+    trim_days: float = 7
+    # the newest windows are always uploaded again (late revisions); older ones only when their file changed
+    tail_windows: int = 4
+    cache_seconds: int = 60  # max-age of the (mutable) track objects
+    track_chunk: int = 16384  # samples per chunk object
     extra: dict = field(default_factory=dict)
 
     @property
@@ -68,6 +82,8 @@ class Model:
     @classmethod
     def from_dict(cls, d: dict) -> "Model":
         d = dict(d)
+        if d.get("kind") == "track":
+            d.setdefault("ov_vars", [])
         layout = d.pop("layout", {})
         d["scales"] = d.pop("scales", {})
         d["ov_scales"] = d.pop("ov_scales", {})
@@ -83,6 +99,13 @@ class Model:
         m = cls(**params, extra={k: v for k, v in {**d, **layout}.items() if k not in known})
         if bool(m.url) == bool(m.files):
             raise ValueError(f"model {m.name}: give exactly one of `url` and `files`")
+        if m.kind not in ("grid", "track"):
+            raise ValueError(f"model {m.name}: kind must be \"grid\" or \"track\"")
+        if m.kind == "track":
+            if not m.files or m.tail_windows < 1 or m.track_chunk < 1:
+                raise ValueError(f"model {m.name}: a track model needs `files`, tail_windows >= 1 and track_chunk >= 1")
+            if m.lat not in m.scales or m.lon not in m.scales:
+                raise ValueError(f"model {m.name}: a track model needs scales for {m.lat} and {m.lon}")
         missing = [v for v in dict.fromkeys(m.vars + m.ov_vars) if v not in m.scales]
         if missing:
             raise ValueError(f"model {m.name}: no scale for {missing}")

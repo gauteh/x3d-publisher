@@ -1,0 +1,39 @@
+# Sentinel-3A along-track significant wave height and wind speed (CMEMS NRT L3) from the files on lustre.
+# A track dataset: one growing 1-D time series (no grid, no map/ov layouts), see x3d-publisher's track.py.
+name = "altimeter_s3a"
+kind = "track"
+# strftime pattern: the directory is the month of the window start. The files are
+# global_vavh_l3_rt_s3a_<window start>_<window end>_<creation>.nc, 3 h windows re-issued about hourly while data arrive late:
+# the file with the newest creation stamp of a window is used.
+files = ["/lustre/storeB/project/fou/om/altimeter/s3a/%Y/%m/global_vavh_l3_rt_s3a_*.nc"]
+files_min_age = 300  # seconds since the last modification
+
+retention_days = 30
+trim_days = 7        # the series is cut at the start only when it is older than retention_days + trim_days
+tail_windows = 4     # the newest windows are uploaded again at every update; older chunks only when their file was replaced
+
+lat = "latitude"
+lon = "longitude"
+# attributes that describe a single file of the source
+drop_attrs = ["first_meas_time", "last_meas_time", "equator_time", "equator_longitude", "creation_date", "software_version"]
+vars = ["VAVH", "VAVH_UNFILTERED", "WIND_SPEED"]
+
+[attrs]
+title = "Sentinel-3A along-track significant wave height and wind speed (NRT)"
+
+[layout]
+zstd_level = 5
+track_chunk = 16384  # samples per chunk object (about 2 windows)
+
+# int16 packing (the source has 0.001 for the heights); latitude/longitude are int32 (the source's 1e-6 degrees)
+[scales]
+VAVH = 0.001
+VAVH_UNFILTERED = 0.001
+WIND_SPEED = 0.01
+latitude = 0.000001
+longitude = 0.000001
+
+[ranges]
+VAVH = [0, 30]
+VAVH_UNFILTERED = [0, 30]
+WIND_SPEED = [0, 80]

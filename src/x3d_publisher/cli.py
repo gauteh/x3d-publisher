@@ -35,6 +35,7 @@ def add_convert_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--vars", nargs="+", help="variables of the field layouts (default: the model's)")
     p.add_argument("--published", help="base URL of the published store (<base>/latest.json); exit 3 without converting if it already has these time steps")
     p.add_argument("--workers", type=int, default=int(env("WORKERS", 4)), help="threads for dask/zarr (default 4, or $WORKERS)")
+    p.add_argument("--now", help="track models: ISO UTC time the retention counts back from (default: now)")
 
 
 def cmd_serve(a) -> int:
@@ -55,10 +56,21 @@ def cmd_models(a) -> int:
     return 0
 
 
+def parse_now(a):
+    import datetime as dt
+
+    return dt.datetime.fromisoformat(a.now.rstrip("Z")) if a.now else None
+
+
 def cmd_convert(a) -> int:
     from .convert import convert
 
-    return convert(models.load(a.model), a.out, url=a.url, name=a.name, start=a.start, hours=a.hours, run=a.run,
+    m = models.load(a.model)
+    if m.kind == "track":
+        from . import track
+
+        return track.convert_track(m, a.out, name=a.name, now=parse_now(a), previous=a.published and track.http_info(a.published))
+    return convert(m, a.out, url=a.url, name=a.name, start=a.start, hours=a.hours, run=a.run,
                    vars=a.vars, published=a.published, workers=a.workers)
 
 
@@ -67,6 +79,12 @@ def cmd_publish(a) -> int:
 
     if not a.dest:
         raise SystemExit("destination required (argument or $S3_DEST)")
+    from . import track
+
+    if track.is_track(a.src):
+        track.publish_track(a.src, a.dest, endpoint_url=a.endpoint_url, configure=a.configure_bucket, workers=a.workers,
+                            validate=not a.no_validate, model=models.load(a.model) if a.model else None)
+        return 0
     if a.keep is not None and a.keep < 1:
         raise SystemExit("--keep must be >= 1")
     publish(a.src, a.dest, endpoint_url=a.endpoint_url, keep=a.keep, grace_hours=a.grace_hours, dry_run=a.dry_run,
@@ -122,6 +140,11 @@ def cmd_run(a) -> int:
     m = models.load(a.model)
     name = a.name or m.name
     bucket_url = a.bucket_url.rstrip("/")
+    if m.kind == "track":
+        from . import track
+
+        return track.run_cycle(m, bucket_url=bucket_url, endpoint_url=a.endpoint_url, name=name, now=parse_now(a), force=a.force,
+                               check=a.check, work=a.work, workers=a.upload_workers, configure=a.configure_bucket)
     pub = None
     if not a.force:
         pub = a.published_url or (a.endpoint_url and f"{a.endpoint_url.rstrip('/')}/{bucket_url[len('s3://'):]}")
