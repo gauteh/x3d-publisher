@@ -98,11 +98,22 @@ def test_incremental_publish_rewrites_only_the_tail(tmp_path, m, s3):
     assert info["n"] == (NW - 1) * 60 + 90 + 60 and len(info["windows"]) == NW + 1
 
 
+def test_a_store_without_the_current_encoding_is_uploaded_again(m):
+    ws = [{"start": f"2026082{k}T000000", "version": "v", "n": 100, "offset": k * 100} for k in range(10)]
+    info = dict(chunk=64, time_chunk=256, vars=m.vars, scales=m.scales, delta=track.delta_arrays(m), windows=ws, n=1000)
+    prev = {**info, "kind": "track"}
+    assert track.plan_upload(prev, info, 2, set(), set()) == 800  # only the tail
+    assert track.plan_upload({k: v for k, v in prev.items() if k != "delta"}, info, 2, set(), set()) == 0
+
+
 def test_x3d_reads_the_track_store(tmp_path, m):
     pytest.importorskip("x3d")
     for k in range(3):
         window(tmp_path, k, 4, 100)
     track.convert_track(m, tmp_path / "out", now=NOW)
+    for a in ("time", "latitude", "longitude"):  # delta-coded; the reader undoes it
+        codecs = json.loads((tmp_path / f"out/altimeter_s3a/track/track.zarr/{a}/zarr.json").read_text())["codecs"]
+        assert [c["name"] for c in codecs] == ["numcodecs.delta", "bytes", "zstd"]
     ds = xr.open_dataset(f"x3d+file://{tmp_path / 'out/altimeter_s3a'}")  # the layout is detected
     assert ds.sizes == {"time": 300} and {"latitude", "longitude"} <= set(ds.coords)
     assert -180 <= float(ds.longitude.min()) and float(ds.longitude.max()) < 180

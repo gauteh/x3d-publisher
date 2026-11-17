@@ -1,7 +1,7 @@
 """Track datasets: along-track time series (satellite altimeter) as one growing 1-D time series.
 
 There is no grid, so none of the map/ts/ov layouts. The store is one Zarr v3 group of 1-D arrays along `time`, cut
-into chunks of `track_chunk` samples (one object each, plain `bytes` + `zstd`, no sharding), except `time` that has
+into chunks of `track_chunk` samples (one object each, `bytes` + `zstd`, no sharding; `time`, `latitude` and `longitude` are `numcodecs.delta`-coded first), except `time` that has
 the larger `track_time_chunk` (readers need all of it to open the store, and it is small):
 
   <store>/latest.json                    {"run": "track", "kind": "track"}
@@ -37,6 +37,7 @@ from pathlib import Path
 
 import numpy as np
 import xarray as xr
+from numcodecs.zarr3 import Delta
 from zarr.codecs import ZstdCodec
 
 from .convert import UP_TO_DATE, extent, global_attrs, jsonable, to_iso, var_attrs
@@ -213,10 +214,12 @@ class TrackWriter:
         )
         if not self.started:
             comp, c = ZstdCodec(level=m.zstd_level), (m.track_chunk,)
-            enc = {"time": {"units": "seconds since 1970-01-01T00:00:00", "dtype": "int64", "chunks": (m.track_time_chunk,), "compressors": (comp,)}}
+            enc = {"time": {"units": "seconds since 1970-01-01T00:00:00", "dtype": "int64", "chunks": (m.track_time_chunk,), "filters": (Delta(dtype="int64"),), "compressors": (comp,)}}
             for v in (*m.vars, m.lat, m.lon):
                 fill, dtype = (FILL32, "int32") if v in (m.lat, m.lon) else (FILL16, "int16")
                 enc[v] = {"dtype": dtype, "scale_factor": m.scales[v], "_FillValue": fill, "fill_value": fill, "chunks": c, "compressors": (comp,)}
+                if v in (m.lat, m.lon):
+                    enc[v]["filters"] = (Delta(dtype=dtype),)
             ds.to_zarr(self.path, mode="w", zarr_format=3, consolidated=False, encoding=enc)
             self.started = True
         else:  # the encoding of the existing arrays is used
@@ -314,7 +317,7 @@ def convert_track(m: Model, out, *, name: str | None = None, now: dt.datetime | 
     writer.close(attrs, vattrs)
     assert writer.n == n, (writer.n, n)
     (path / "dataset.json").write_text(json.dumps({
-        "format_version": FORMAT_VERSION, "kind": "track", "name": name, "run": RUN, "n": n, "chunk": m.track_chunk, "time_chunk": m.track_time_chunk,
+        "format_version": FORMAT_VERSION, "kind": "track", "name": name, "run": RUN, "n": n, "chunk": m.track_chunk, "time_chunk": m.track_time_chunk, "delta": delta_arrays(m),
         "dims": {"time": "time"}, "geo": [m.lat, m.lon], "vars": m.vars, "scales": m.scales,
         "tmin": times[0], "tmax": times[-1],
         "bbox": [bounds["geospatial_lon_min"], bounds["geospatial_lat_min"], bounds["geospatial_lon_max"], bounds["geospatial_lat_max"]],
@@ -369,12 +372,18 @@ def is_before(info: dict, key: str, first: int) -> bool:
     return (chunk_index(key) or 0) < first // chunk_size(info, key)
 
 
+def delta_arrays(m: Model) -> list[str]:
+    """The arrays stored delta-coded (`numcodecs.delta`): they are smooth, so this is much smaller, and readers get the
+    whole of `time` when they open the store."""
+    return ["time", m.lat, m.lon]
+
+
 def plan_upload(previous: dict | None, info: dict, tail_windows: int, remote_chunks: set[str], local_chunks: set[str]) -> int:
     """First sample to upload (0 = everything): the first sample of the first changed window or of the `tail_windows`-th
     newest window, whichever is first; chunk objects that end before it are kept. Everything is uploaded if what is
     published does not match (other chunking, variables or scales; a chunk before that point is missing or should not exist)."""
     ws = info["windows"]
-    keys = ("chunk", "time_chunk", "vars", "scales")
+    keys = ("chunk", "time_chunk", "vars", "scales", "delta")
     if not previous or previous.get("kind") != "track" or any(previous.get(k) != info[k] for k in keys):
         return 0
     boundary = min(first_changed(previous["windows"], ws), max(0, len(ws) - tail_windows))
