@@ -58,6 +58,7 @@ def cache_control(m: Model | None) -> str:
     return f"public, max-age={m.cache_seconds if m else 60}"
 
 
+STAT_RECENT = dt.timedelta(days=1)  # only files created within this long before `now` are checked for being empty or in progress
 ATTRS = ("standard_name", "long_name", "units", "comment")
 
 
@@ -89,34 +90,50 @@ def candidates(m: Model, lo: dt.datetime | None, hi: dt.datetime) -> list[tuple[
             if "%" in pattern:
                 raise ValueError("unlimited track retention supports only %Y and %m in file patterns")
             pats.setdefault(pattern, i)
-        return [(i, f) for p, i in pats.items() for f in sorted(glob.glob(p))]
+        return list_files(pats)
     cur = lo.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     while cur <= hi:
         for i, g in enumerate(m.file_globs):
             pats.setdefault(cur.strftime(g), i)
         cur = (cur + dt.timedelta(days=32)).replace(day=1)
-    return [(i, f) for p, i in pats.items() for f in sorted(glob.glob(p))]
+    return list_files(pats)
+
+
+def list_files(pats: dict[str, int]) -> list[tuple[int, str]]:
+    out = []
+    for p, i in pats.items():
+        t0 = time.monotonic()
+        files = sorted(glob.glob(p))
+        log.info("listed %d files matching %s in %.1f s", len(files), p, time.monotonic() - t0)
+        out += [(i, f) for f in files]
+    return out
 
 
 def windows_available(m: Model, lo: dt.datetime | None, hi: dt.datetime) -> dict[str, list[str]]:
     """Window start stamp -> usable files, newest version (creation stamp) first. A file is usable when it is not empty
-    and was not modified in the last `files_min_age` seconds. Where several globs (production systems) have the same
+    and was not modified in the last `files_min_age` seconds (only checked for files created in the last day). Where several globs (production systems) have the same
     file, the first is preferred."""
     rx, wall = re.compile(m.files_window_regex), time.time()
     found: dict[str, dict[str, list[str]]] = {}
-    for i, f in candidates(m, lo, hi):
+    files = candidates(m, lo, hi)
+    fresh, statted, t0 = stamp(hi - STAT_RECENT), 0, time.monotonic()
+    for i, f in files:
         mt = rx.search(Path(f).name)
         if not mt:
             continue
         start, _, version = mt.groups()
         if (lo is not None and start < stamp(lo)) or start > stamp(hi):
             continue
-        try:
-            st = Path(f).stat()
-        except OSError:
-            continue
-        if st.st_size > 0 and wall - st.st_mtime >= m.files_min_age:
-            found.setdefault(start, {}).setdefault(version, []).append(f)
+        if version >= fresh:  # older files are complete, and stat is slow on network file systems
+            statted += 1
+            try:
+                st = Path(f).stat()
+            except OSError:
+                continue
+            if st.st_size == 0 or wall - st.st_mtime < m.files_min_age:
+                continue
+        found.setdefault(start, {}).setdefault(version, []).append(f)
+    log.info("checked %d files (%d stat) in %.1f s: %d windows", len(files), statted, time.monotonic() - t0, len(found))
     return {s: [v[ver][0] for ver in sorted(v, reverse=True)] for s, v in sorted(found.items())}
 
 
@@ -244,8 +261,10 @@ def recent_unchanged(m: Model, now: dt.datetime, previous: dict | None) -> bool:
     if not previous or previous.get("kind") != "track" or not previous.get("windows"):
         return False
     lo = (now - dt.timedelta(days=m.check_days)).replace(hour=0, minute=0, second=0, microsecond=0)
+    log.info("quick check of the windows since %s", lo)
     recent = [(s, version_of(m, f[0])) for s, f in windows_available(m, lo, now).items()]
     published = [(w["start"], w["version"]) for w in previous["windows"] if w["start"] >= stamp(lo)]
+    log.info("%d recent source windows, %d published", len(recent), len(published))
     if not recent or recent != published:  # no recent files may mean an unmounted or stale source: compare everything
         return False
     log.info("the windows since %s are published; nothing to do", lo)
@@ -466,7 +485,12 @@ def run_cycle(m: Model, *, bucket_url: str, endpoint_url: str | None = None, nam
     dest = f"{bucket_url.rstrip('/')}/{name}"
     bucket, prefix = split(dest)
     s3 = boto3.client("s3", endpoint_url=endpoint_url)
+    t0 = time.monotonic()
     previous = s3_info(s3, bucket, prefix)
+    if previous and previous.get("kind") == "track":
+        log.info("published %s: %d windows, %s .. %s (read in %.1f s)", dest, len(previous.get("windows", [])), previous.get("tmin"), previous.get("tmax"), time.monotonic() - t0)
+    else:
+        log.info("nothing published at %s yet (%.1f s)", dest, time.monotonic() - t0)
     Path(work or tempfile.gettempdir()).mkdir(parents=True, exist_ok=True)
     tmp = Path(tempfile.mkdtemp(prefix="run.", dir=work))
     try:

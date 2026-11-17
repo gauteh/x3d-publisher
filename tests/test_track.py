@@ -177,6 +177,19 @@ def test_check_does_not_trust_a_source_without_recent_files(tmp_path, m):
         track.convert_track(gone, tmp_path / "out", now=later, previous=info, check=True)
 
 
+def test_only_recent_files_are_checked_for_being_empty(tmp_path, m):
+    for k in (0, 8 * 40):
+        window(tmp_path, k, 4, 30)
+        window(tmp_path, k, 6, 30)
+    now = T0 + dt.timedelta(days=40, hours=5)
+    files = track.windows_available(m, None, now)
+    for f in (files["20260901T000000"][0], files["20261011T000000"][0]):
+        Path(f).write_bytes(b"")
+    again = track.windows_available(m, None, now)
+    assert again["20260901T000000"][0] == files["20260901T000000"][0]  # old: trusted without a stat
+    assert again["20261011T000000"] == files["20261011T000000"][1:]  # recent: empty, the older version is used
+
+
 def test_unlimited_history_rejects_unreadable_windows(tmp_path, m):
     m = dataclasses.replace(m, retention_days=0)
     window(tmp_path, 0, 4, 30)
