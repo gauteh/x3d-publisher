@@ -4,8 +4,9 @@ name = "altimeter_s3a"
 kind = "track"
 # strftime pattern: the directory is the month of the window start. The files are
 # global_vavh_l3_rt_s3a_<window start>_<window end>_<creation>.nc, 3 h windows re-issued about hourly while data arrive late:
-# the file with the newest creation stamp of a window is used.
-files = ["/lustre/storeB/project/fou/om/altimeter/s3a/%Y/%m/global_vavh_l3_rt_s3a_*.nc"]
+# the file with the newest creation stamp of a window is used. storeA also has 2017-2021, but before 2020 the files are
+# per orbit pass (C..._P..._), not 3 h windows: the series starts in 2022.
+files = ["/lustre/storeA/project/fou/om/altimeter/s3a/202[2-9]/%m/global_vavh_l3_rt_s3a_*.nc"]
 files_min_age = 300  # seconds since the last modification
 
 retention_days = 0   # retain all available history
