@@ -163,6 +163,20 @@ def test_check_only_looks_at_the_recent_windows(tmp_path, m):
     assert track.convert_track(m, tmp_path / "out", now=now, previous=info, check=True) == 0
 
 
+def test_check_does_not_trust_a_source_without_recent_files(tmp_path, m):
+    m = dataclasses.replace(m, retention_days=0, check_days=1)
+    window(tmp_path, 0, 4, 30)
+    window(tmp_path, 8 * 40, 4, 30)
+    now = T0 + dt.timedelta(days=40, hours=5)
+    assert track.convert_track(m, tmp_path / "out", now=now) == 0
+    info = json.loads((tmp_path / "out/altimeter_s3a/track/dataset.json").read_text())
+    later = now + dt.timedelta(days=30)  # nothing newer than the published windows: the full comparison runs, still current
+    assert track.convert_track(m, tmp_path / "out", now=later, previous=info, check=True) == UP_TO_DATE
+    gone = dataclasses.replace(m, files=[str(tmp_path / "missing/%Y/%m/s3a_*.nc")])  # an unmounted source is an error
+    with pytest.raises(SystemExit, match="no usable files"):
+        track.convert_track(gone, tmp_path / "out", now=later, previous=info, check=True)
+
+
 def test_unlimited_history_rejects_unreadable_windows(tmp_path, m):
     m = dataclasses.replace(m, retention_days=0)
     window(tmp_path, 0, 4, 30)

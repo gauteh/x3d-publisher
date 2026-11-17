@@ -246,7 +246,7 @@ def recent_unchanged(m: Model, now: dt.datetime, previous: dict | None) -> bool:
     lo = (now - dt.timedelta(days=m.check_days)).replace(hour=0, minute=0, second=0, microsecond=0)
     recent = [(s, version_of(m, f[0])) for s, f in windows_available(m, lo, now).items()]
     published = [(w["start"], w["version"]) for w in previous["windows"] if w["start"] >= stamp(lo)]
-    if recent != published:
+    if not recent or recent != published:  # no recent files may mean an unmounted or stale source: compare everything
         return False
     log.info("the windows since %s are published; nothing to do", lo)
     return True
