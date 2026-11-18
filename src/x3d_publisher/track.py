@@ -22,6 +22,7 @@ half-written (an object PUT is atomic). Publishing order: chunks, then the array
 """
 from __future__ import annotations
 
+import bisect
 import datetime as dt
 import glob
 import json
@@ -50,6 +51,7 @@ log = logging.getLogger("x3d_publisher.track")
 
 RUN = "track"  # the (only) run directory
 ARRAYS = "track.zarr"
+CACHE = "cache.json"  # beside the store: written when it is complete (and can be appended to), with the unreadable source files
 STAMP = "%Y%m%dT%H%M%S"
 FILL16, FILL32 = -32768, int(np.iinfo("int32").min)
 
@@ -166,24 +168,29 @@ def first_changed(previous: list[dict] | None, windows: list[dict]) -> int:
 
 # --- conversion -------------------------------------------------------------------------------------------------
 
-def read_window(m: Model, files: list[str]):
-    """The first readable of `files` (newest first): (file, dataset loaded in memory)."""
+def read_window(m: Model, files: list[str], failed: list[str] | None = None):
+    """The first readable of `files` (newest first): (file, dataset loaded in memory). The unreadable ones tried before it are appended to `failed`."""
     for f in files:
         try:
             with xr.open_dataset(f) as ds:
                 return f, ds[[*m.vars, m.lat, m.lon]].load()
         except Exception as e:  # being written, or a lustre hiccup: the next older version will do
             log.warning("cannot read %s (%s)", f, str(e).splitlines()[0] if str(e) else type(e).__name__)
+            if failed is not None:
+                failed.append(f)
     return None, None
 
 
-def read_windows(m: Model, available: dict[str, list[str]]):
+def read_windows(m: Model, available: dict[str, list[str]], last: float = -np.inf, unreadable: dict[str, list[str]] | None = None):
     """Yield (start, file, source dataset, samples) of the newest readable file of every window, one window in memory at
     a time. The samples (float64 columns) are sorted and strictly increasing across windows (a window is disjoint from the
-    next; this only guards the contract)."""
-    last = -np.inf
+    next; this only guards the contract). `last` is the time of the sample before the first window. The versions of the
+    newer files that could not be read are collected in `unreadable` (window start -> versions)."""
     for start, files in available.items():
-        f, ds = read_window(m, files)
+        failed: list[str] = []
+        f, ds = read_window(m, files, failed)
+        if failed and unreadable is not None:
+            unreadable[start] = [version_of(m, x) for x in failed]
         if ds is None:
             log.warning("window %s skipped: no readable file", start)
             continue
@@ -203,12 +210,29 @@ class TrackWriter:
     """Writes the arrays of the store in batches of whole chunks as the windows come in, so that memory is bounded by one
     batch (`BATCH_CHUNKS` chunks) however long the series is. Group and variable attributes are set at the end."""
 
-    def __init__(self, path: Path, m: Model):
+    def __init__(self, path: Path, m: Model, resume_at: int = 0):
+        """`resume_at` > 0 keeps the first `resume_at` samples of the existing store (a multiple of `track_time_chunk`, so
+        that only whole chunks are dropped) and appends to them."""
         self.path, self.m, self.n, self.started = path, m, 0, False
         self.buf: dict[str, list[np.ndarray]] = {}
         self.buffered = 0
-        if path.exists():
+        if resume_at:
+            self.truncate(resume_at)
+        elif path.exists():
             shutil.rmtree(path)
+
+    def truncate(self, n: int) -> None:
+        import zarr
+
+        g = zarr.open_group(str(self.path), mode="r+", zarr_format=3)
+        for name in (*self.m.vars, self.m.lat, self.m.lon, "time"):
+            chunk = self.m.track_time_chunk if name == "time" else self.m.track_chunk
+            for f in (self.path / name / "c").iterdir():
+                if int(f.name) >= n // chunk:
+                    f.unlink()
+            g[name].resize((n,))
+        zarr.consolidate_metadata(str(self.path))  # stale shapes would otherwise be read when appending
+        self.n, self.started = n, True
 
     def add(self, part: dict) -> None:
         for k, v in part.items():
@@ -289,7 +313,10 @@ def convert_track(m: Model, out, *, name: str | None = None, now: dt.datetime | 
         missing = [w["start"] for w in previous["windows"] if w["start"] not in available]
         if missing:
             raise SystemExit(f"refusing to drop {len(missing)} previously published windows; first missing: {missing[0]}")
-    newest = {s: version_of(m, f[0]) for s, f in available.items()}
+    root = Path(out) / name
+    cached, unreadable = load_cache(m, root)
+    retest(m, available, unreadable)
+    newest = effective(m, available, unreadable)
     if not force and previous and previous.get("kind") == "track" and [(w["start"], w["version"]) for w in previous["windows"]] == list(newest.items()):
         log.info("published store already has these %d windows; nothing to do", len(newest))
         return UP_TO_DATE
@@ -297,18 +324,105 @@ def convert_track(m: Model, out, *, name: str | None = None, now: dt.datetime | 
         log.info("the published store is out of date: %d windows to convert", len(newest))
         return 0
 
-    root = Path(out) / name
+    resume = plan_resume(m, cached, newest) if cached else None
+    (root / CACHE).unlink(missing_ok=True)  # the store is incomplete from here until the end
+    try:
+        write_track(m, root, name, available, unreadable, cached, resume)
+    except ResumeError as e:
+        log.warning("cannot append to the kept store (%s); converting everything", e)
+        write_track(m, root, name, available, unreadable, None, None)
+    return 0
+
+
+class ResumeError(Exception):
+    pass
+
+
+def load_cache(m: Model, root: Path) -> tuple[dict | None, dict[str, list[str]]]:
+    """The dataset.json of the kept store in `root` if it was completed and can be appended to (same layout as the model
+    now has), and the versions of source files that were found unreadable (window start -> versions)."""
+    try:
+        unreadable = json.loads((root / CACHE).read_text()).get("unreadable", {})
+        info = json.loads((root / RUN / "dataset.json").read_text())
+    except (OSError, ValueError):
+        return None, {}
+    same = (info.get("kind") == "track" and info.get("chunk") == m.track_chunk and info.get("time_chunk") == m.track_time_chunk
+            and info.get("vars") == m.vars and info.get("scales") == m.scales and info.get("delta") == delta_arrays(m)
+            and m.track_time_chunk % m.track_chunk == 0 and (root / RUN / ARRAYS / "time").is_dir())
+    return (info if same else None), unreadable
+
+
+def retest(m: Model, available: dict[str, list[str]], unreadable: dict[str, list[str]]) -> None:
+    """Forget the unreadable versions that can be read now (they were in the process of being written, or a hiccup)."""
+    for start in list(unreadable):
+        bad = [f for f in available.get(start, []) if version_of(m, f) in unreadable[start]]
+        still = [version_of(m, f) for f in bad if read_window(m, [f])[0] is None]
+        if still:
+            unreadable[start] = still
+        else:
+            del unreadable[start]
+
+
+def effective(m: Model, available: dict[str, list[str]], unreadable: dict[str, list[str]]) -> dict[str, str]:
+    """Window start -> version of the file that is used: the newest that is not known to be unreadable (windows without one are left out)."""
+    out = {}
+    for start, files in available.items():
+        for f in files:
+            if version_of(m, f) not in unreadable.get(start, []):
+                out[start] = version_of(m, f)
+                break
+    return out
+
+
+def plan_resume(m: Model, cached: dict, newest: dict[str, str]) -> tuple[int, int] | None:
+    """(index of the window to start converting from, sample count to keep) to append to the kept store, or None. Whole
+    `track_time_chunk` chunks before the first window that differs from the kept store are kept, so the windows from the
+    one that contains the first dropped sample are converted again."""
+    cw = cached["windows"]
+    k = 0
+    for w, (start, version) in zip(cw, newest.items()):
+        if (w["start"], w["version"]) != (start, version):
+            break
+        k += 1
+    first = cw[k]["offset"] if k < len(cw) else cached["n"]
+    keep = first // m.track_time_chunk * m.track_time_chunk
+    if keep == 0:
+        return None
+    return bisect.bisect_right([w["offset"] for w in cw], keep) - 1, keep
+
+
+def write_track(m: Model, root: Path, name: str, available: dict[str, list[str]], unreadable: dict[str, list[str]],
+                cached: dict | None, resume: tuple[int, int] | None) -> None:
+    import zarr
+
     path = root / RUN
     path.mkdir(parents=True, exist_ok=True)
-    writer = TrackWriter(path / ARRAYS, m)
-    windows, offset, src, t0, t1 = [], 0, None, None, None
+    windows, offset, skip, last, src, t0, t1 = [], 0, 0, -np.inf, None, None, None
     box = {"lat": [np.inf, -np.inf], "lon": [np.inf, -np.inf]}
-    for k, (start, f, ds, part) in enumerate(read_windows(m, available), 1):
+    todo, kept_unreadable = available, {}
+    if resume:
+        i, keep = resume
+        cw = cached["windows"]
+        time_ = zarr.open_array(str(path / ARRAYS / "time"), mode="r", zarr_format=3)
+        windows, offset, skip = cw[:i], cw[i]["offset"], keep - cw[i]["offset"]
+        t0, t1, last = int(time_[0]), int(time_[keep - 1]), int(time_[offset - 1]) if offset else -np.inf
+        w, e, s_, n_ = cached["bbox"]
+        box = {"lat": [s_, n_], "lon": [w, e]}
+        todo = {s: f for s, f in available.items() if s >= cw[i]["start"]}
+        kept_unreadable = {s: v for s, v in unreadable.items() if s < cw[i]["start"]}
+        log.info("keeping %d windows and %d samples of the stored series; converting %d windows from %s", i, keep, len(todo), cw[i]["start"])
+    writer = TrackWriter(path / ARRAYS, m, resume_at=resume[1] if resume else 0)
+    fresh: dict[str, list[str]] = {}
+    for k, (start, f, ds, part) in enumerate(read_windows(m, todo, last, fresh), 1):
         n = len(part["time"])
+        if resume and k == 1 and (start != cw[i]["start"] or n != cw[i]["n"]):
+            raise ResumeError(f"window {start} has {n} samples, the stored one {cw[i]['n']}")
         windows.append({"start": start, "version": version_of(m, f), "n": n, "offset": offset})
         offset += n
         src = ds
-        if n:
+        if k == 1 and skip:
+            part = {key: v[skip:] for key, v in part.items()}
+        if len(part["time"]):
             t0 = part["time"][0] if t0 is None else t0
             t1 = part["time"][-1]
             for key, v in (("lat", m.lat), ("lon", m.lon)):
@@ -317,10 +431,12 @@ def convert_track(m: Model, out, *, name: str | None = None, now: dt.datetime | 
                     box[key] = [min(box[key][0], float(x.min())), max(box[key][1], float(x.max()))]
             writer.add(part)
         if k % 1000 == 0:
-            log.info("%d of %d windows, %d samples", k, len(available), offset)
+            log.info("%d of %d windows, %d samples", k, len(todo), offset)
+    if resume and not windows[i:]:
+        raise ResumeError("no window to continue from")
     if not offset:
         raise SystemExit("no samples in the source files")
-    skipped = sorted(set(available) - {w["start"] for w in windows})
+    skipped = sorted(set(available) - {w["start"] for w in windows} - set(unreadable))
     if skipped and m.retention_days == 0:
         raise SystemExit(f"refusing to omit {len(skipped)} unreadable windows; first: {skipped[0]}")
 
@@ -343,9 +459,9 @@ def convert_track(m: Model, out, *, name: str | None = None, now: dt.datetime | 
         "windows": windows, "attrs": attrs, "variables": {k: {a: jsonable(b) for a, b in v.items()} for k, v in vattrs.items()},
     }))
     (root / "latest.json").write_text(json.dumps({"run": RUN, "kind": "track"}))
+    (root / CACHE).write_text(json.dumps({"unreadable": {**kept_unreadable, **fresh}}))  # the store is complete
     size = sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
     log.info("done: %d samples in %d windows (%s .. %s) -> %s (%.1f MB)", n, len(windows), times[0], times[-1], path, size / 1e6)
-    return 0
 
 
 # --- published state --------------------------------------------------------------------------------------------
@@ -492,7 +608,8 @@ def run_cycle(m: Model, *, bucket_url: str, endpoint_url: str | None = None, nam
     else:
         log.info("nothing published at %s yet (%.1f s)", dest, time.monotonic() - t0)
     Path(work or tempfile.gettempdir()).mkdir(parents=True, exist_ok=True)
-    tmp = Path(tempfile.mkdtemp(prefix="run.", dir=work))
+    # with a work directory the converted store is kept there, and the next cycle only converts what changed
+    tmp = Path(work) / "keep" if work else Path(tempfile.mkdtemp(prefix="run."))
     try:
         rc = convert_track(m, tmp, name=name, now=now, previous=previous, check=check, force=force)
         if rc == UP_TO_DATE:
@@ -502,4 +619,5 @@ def run_cycle(m: Model, *, bucket_url: str, endpoint_url: str | None = None, nam
         publish_track(tmp / name, dest, endpoint_url=endpoint_url, configure=configure, workers=workers, s3=s3, model=m)
         return 0
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        if not work:
+            shutil.rmtree(tmp, ignore_errors=True)

@@ -210,3 +210,39 @@ def test_a_series_that_lost_most_samples_is_rejected(tmp_path, m):
         from x3d_publisher.validate import validate_track
 
         validate_track(tmp_path / "out/altimeter_s3a/track", m, prev)
+
+
+def test_kept_store_is_appended_to_and_equals_a_full_conversion(tmp_path, m, caplog):
+    for k in range(NW):
+        window(tmp_path, k, 4, 60)
+    kept = tmp_path / "kept"
+    assert track.convert_track(m, kept, name="alt", now=NOW) == 0
+    window(tmp_path, NW - 1, 6, 90)  # revised
+    window(tmp_path, NW, 4, 60)  # new
+    caplog.set_level("INFO")
+    assert track.convert_track(m, kept, name="alt", now=NOW) == 0
+    assert "keeping" in caplog.text
+    assert track.convert_track(m, tmp_path / "full", name="alt", now=NOW) == 0
+
+    def load(root):
+        info = json.loads((root / "alt/track/dataset.json").read_text())
+        ds = xr.open_zarr(root / "alt/track/track.zarr", consolidated=False).load()
+        return info, ds
+
+    (i1, d1), (i2, d2) = load(kept), load(tmp_path / "full")
+    assert i1["windows"] == i2["windows"] and i1["n"] == i2["n"] and i1["tmin"] == i2["tmin"] and i1["tmax"] == i2["tmax"]
+    xr.testing.assert_equal(d1, d2)  # the attributes carry the conversion time
+
+
+def test_unreadable_newest_file_does_not_force_a_full_conversion(tmp_path, m, caplog):
+    for k in range(NW):
+        window(tmp_path, k, 4, 60)
+    (tmp_path / "src/2026/09/s3a_20260901T090000_20260901T120000_20260901T130000.nc").write_bytes(b"not netcdf")  # newer than window 3's file
+    kept = tmp_path / "kept"
+    assert track.convert_track(m, kept, name="alt", now=NOW) == 0
+    info = json.loads((kept / "alt/track/dataset.json").read_text())
+    assert track.convert_track(m, kept, name="alt", now=NOW, previous=info) == UP_TO_DATE
+    caplog.set_level("INFO")
+    window(tmp_path, NW, 4, 60)
+    assert track.convert_track(m, kept, name="alt", now=NOW, previous=info) == 0
+    assert "keeping 3 windows" in caplog.text or "keeping" in caplog.text

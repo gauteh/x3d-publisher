@@ -18,7 +18,7 @@ env = os.environ.get
 
 def setup_logging(verbose: bool) -> None:
     logging.basicConfig(level=logging.DEBUG if verbose else logging.INFO,
-                        format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
+                        format="%(asctime)s %(levelname)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
     for noisy in ("zarr", "fsspec", "asyncio", "urllib3", "botocore", "boto3", "s3transfer"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
     if not verbose:
